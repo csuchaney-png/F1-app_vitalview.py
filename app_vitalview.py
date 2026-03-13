@@ -1607,7 +1607,7 @@ def tab_map(df):
         return
 
     if len(map_type_opts) > 1:
-        map_type = st.radio("Map level", map_type_opts, horizontal=True, key="map_type")
+        map_type = st.radio("Map level", map_type_opts, horizontal=True, key="map_type_radio")
     else:
         map_type = map_type_opts[0]
         st.info(f"Mapping at: **{map_type}**")
@@ -2214,10 +2214,10 @@ def show_auth_page():
     )
 
     mode = st.radio(
-        "", ["Log In", "Sign Up", "Reset Password"],
+        "Auth mode", ["Log In", "Sign Up", "Reset Password"],
         horizontal=True, label_visibility="collapsed",
+        key="auth_mode_radio",
     )
-    st.markdown('<div class="vv-auth-wrap">', unsafe_allow_html=True)
 
     if mode == "Log In":
         st.markdown('<div class="vv-auth-title">Welcome back</div>', unsafe_allow_html=True)
@@ -2316,7 +2316,15 @@ def show_auth_page():
 
         if st.button("Create Account", key="su_btn"):
             ok, msg = add_user(name, email, pwd, plan)
-            st.success(msg + " Please log in.") if ok else st.error(msg)
+            st.session_state["su_result"] = (ok, msg)
+            st.rerun()
+
+        if "su_result" in st.session_state:
+            ok, msg = st.session_state.pop("su_result")
+            if ok:
+                st.success("Account created successfully. Please log in.")
+            else:
+                st.error(msg)
 
     else:
         st.markdown('<div class="vv-auth-title">Reset Password</div>', unsafe_allow_html=True)
@@ -2334,7 +2342,7 @@ def show_auth_page():
             ok, msg = finish_reset(r_email, r_code, r_new)
             st.success(msg) if ok else st.error(msg)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+
 
 
 # ================================================================
@@ -2716,36 +2724,108 @@ def render_sidebar(user):
             </span>
         </div>""", unsafe_allow_html=True)
 
+        # ── Multi-file upload: up to 3 files ────────────────────
+        if "uploaded_files" not in st.session_state:
+            st.session_state["uploaded_files"] = {}   # {name: df}
+        if "active_file" not in st.session_state:
+            st.session_state["active_file"] = None
+
+        st.markdown(f"""
+        <div style="font-size:0.65rem;font-weight:700;color:{T["primary"]};
+                    text-transform:uppercase;letter-spacing:0.1em;margin-bottom:0.4rem;">
+            Upload Files (up to 3)
+        </div>""", unsafe_allow_html=True)
+
         sb_upload = st.file_uploader(
             "📂 Upload CSV or Excel",
             type=["csv", "xlsx", "xls"],
             key="sidebar_upload",
-            help="Drag & drop or click. Max 50 MB. See format guide above.",
+            help="Upload up to 3 files to compare. Each replaces the oldest if full.",
+            accept_multiple_files=False,
         )
         if sb_upload:
             try:
-                raw = load_file(sb_upload)
+                raw    = load_file(sb_upload)
                 schema = enforce_schema(raw)
-                # Always store both raw and schema-validated versions
-                st.session_state["raw_df"]      = schema if dashboard_ready(schema) else raw
+                df_to_store = schema if dashboard_ready(schema) else raw
+
+                # Store in multi-file dict (max 3 — drop oldest if full)
+                files = st.session_state["uploaded_files"]
+                if sb_upload.name not in files:
+                    if len(files) >= 3:
+                        oldest = next(iter(files))
+                        del files[oldest]
+                files[sb_upload.name] = df_to_store
+                st.session_state["uploaded_files"] = files
+                st.session_state["active_file"]    = sb_upload.name
+
+                # Set as primary df
+                st.session_state["raw_df"]      = df_to_store
                 st.session_state["upload_name"] = sb_upload.name
                 if dashboard_ready(schema):
                     st.session_state["df"]        = schema
                     st.session_state["dfx"]       = schema
                     st.session_state["demo_mode"] = False
-                    # Clear cached radio so map tab auto-switches to uploaded file
                     for _k in ("map_source", "map_indicator", "map_type"):
                         st.session_state.pop(_k, None)
-                    st.success(f"✅ Loaded: **{sb_upload.name}** — {len(schema)} rows, {schema['county'].nunique()} counties. Go to the Map tab!")
+                    st.success(f"✅ **{sb_upload.name}** — {len(schema):,} rows")
                 else:
-                    st.info(
-                        f"✅ Loaded: {sb_upload.name} — "
-                        "use ZIP Heatmap or Equity Scanner tabs. "
-                        "For Dashboard & Map, your file needs: "
-                        "state, county, fips, year, indicator, value, unit"
-                    )
+                    st.info(f"✅ Loaded {sb_upload.name} — use ZIP/Equity tabs")
             except Exception as e:
                 st.error(str(e))
+
+        # ── File switcher: show loaded files as buttons ───────
+        files = st.session_state.get("uploaded_files", {})
+        if files:
+            st.markdown(f"""
+            <div style="font-size:0.65rem;font-weight:700;color:{T["primary"]};
+                        text-transform:uppercase;letter-spacing:0.1em;
+                        margin:0.75rem 0 0.35rem;">
+                Loaded Files ({len(files)}/3)
+            </div>""", unsafe_allow_html=True)
+            for fname, fdf in files.items():
+                is_active = st.session_state.get("active_file") == fname
+                border    = T["accent"] if is_active else T["border"]
+                rows      = len(fdf)
+                label     = f"{'▶ ' if is_active else ''}{fname[:22]}{'…' if len(fname)>22 else ''} ({rows:,}r)"
+                if st.button(label, key=f"switch_file_{fname}", use_container_width=True):
+                    st.session_state["active_file"]    = fname
+                    st.session_state["raw_df"]         = fdf
+                    st.session_state["upload_name"]    = fname
+                    if dashboard_ready(fdf):
+                        st.session_state["df"]         = fdf
+                        st.session_state["dfx"]        = fdf
+                        st.session_state["demo_mode"]  = False
+                        for _k in ("map_source", "map_indicator", "map_type"):
+                            st.session_state.pop(_k, None)
+                    st.rerun()
+
+            # Compare mode toggle
+            if len(files) >= 2:
+                st.markdown(f"""
+                <div style="font-size:0.65rem;font-weight:700;color:{T["primary"]};
+                            text-transform:uppercase;letter-spacing:0.1em;
+                            margin:0.75rem 0 0.35rem;">
+                    Compare Mode
+                </div>""", unsafe_allow_html=True)
+                compare_on = st.toggle("Compare files side-by-side",
+                                       key="compare_mode",
+                                       value=st.session_state.get("compare_mode", False))
+                if compare_on and len(files) >= 2:
+                    fnames = list(files.keys())
+                    st.session_state["compare_file_a"] = st.selectbox(
+                        "File A", fnames, key="cmp_a")
+                    st.session_state["compare_file_b"] = st.selectbox(
+                        "File B", [f for f in fnames if f != st.session_state.get("compare_file_a")],
+                        key="cmp_b")
+
+            # Clear all button
+            if st.button("🗑 Clear all files", key="clear_files", use_container_width=True):
+                st.session_state["uploaded_files"] = {}
+                st.session_state["active_file"]    = None
+                st.session_state["upload_name"]    = None
+                st.session_state["demo_mode"]      = True
+                st.rerun()
 
         # ── Filters (only when schema data present) ──────────────
         df_cur = st.session_state.get("df", pd.DataFrame())
@@ -2799,111 +2879,57 @@ def main():
     inject_css()
     init_db()
 
-    # Floating sidebar toggle — uses Streamlit's own collapse button reliably
+    # Sidebar toggle — styles both the collapsed AND expanded control buttons
     st.markdown("""
     <style>
-    /* Hide Streamlit's default collapse button visually */
-    [data-testid="collapsedControl"] { display: none !important; }
-
-    /* Our gradient toggle tab */
-    #vv-sidebar-tab {
-        position: fixed;
-        top: 50%;
-        left: 0px;
-        transform: translateY(-50%);
-        z-index: 999999;
-        width: 24px;
-        height: 72px;
-        background: linear-gradient(180deg, #1a8fff 0%, #00d4ff 100%);
-        border-radius: 0 10px 10px 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        box-shadow: 3px 0 16px rgba(0,212,255,0.4);
-        cursor: pointer;
-        transition: width 0.15s, left 0.3s, box-shadow 0.15s;
-        user-select: none;
+    /* Works for both sidebar states: collapsed (left edge) and expanded (beside sidebar) */
+    [data-testid="collapsedControl"],
+    [data-testid="stSidebarCollapsedControl"] {
+        position: fixed !important;
+        top: 50% !important;
+        transform: translateY(-50%) !important;
+        z-index: 999999 !important;
+        width: 24px !important;
+        height: 72px !important;
+        background: linear-gradient(180deg, #1a8fff 0%, #00d4ff 100%) !important;
+        border-radius: 0 10px 10px 0 !important;
+        box-shadow: 3px 0 16px rgba(0,212,255,0.4) !important;
+        overflow: hidden !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        transition: width 0.15s, box-shadow 0.15s !important;
+        left: 0 !important;
     }
-    #vv-sidebar-tab:hover {
-        width: 30px;
-        box-shadow: 4px 0 22px rgba(0,212,255,0.65);
+    [data-testid="collapsedControl"]:hover,
+    [data-testid="stSidebarCollapsedControl"]:hover {
+        width: 30px !important;
+        box-shadow: 4px 0 22px rgba(0,212,255,0.65) !important;
     }
-    #vv-sidebar-tab svg {
-        width: 14px; height: 14px;
-        fill: none;
-        stroke: #fff;
-        stroke-width: 2.8;
-        stroke-linecap: round;
-        stroke-linejoin: round;
+    [data-testid="collapsedControl"] button,
+    [data-testid="stSidebarCollapsedControl"] button {
+        width: 100% !important;
+        height: 100% !important;
+        background: transparent !important;
+        border: none !important;
+        cursor: pointer !important;
+        color: white !important;
+        padding: 0 !important;
+    }
+    [data-testid="collapsedControl"] button svg,
+    [data-testid="stSidebarCollapsedControl"] button svg {
+        width: 14px !important;
+        height: 14px !important;
+        stroke: white !important;
+        fill: none !important;
+        stroke-width: 2.5 !important;
+    }
+    /* When sidebar IS open, the toggle button sits at the sidebar's right edge */
+    [data-testid="stSidebar"][aria-expanded="true"] ~ div [data-testid="collapsedControl"],
+    [data-testid="stSidebar"][aria-expanded="true"] ~ div [data-testid="stSidebarCollapsedControl"] {
+        left: var(--sidebar-width, 21rem) !important;
+        border-radius: 0 10px 10px 0 !important;
     }
     </style>
-
-    <div id="vv-sidebar-tab" onclick="vvToggle()">
-        <svg viewBox="0 0 24 24"><polyline id="vv-chev" points="9,6 15,12 9,18"/></svg>
-    </div>
-
-    <script>
-    (function(){
-        var _sidebarOpen = true;
-
-        function getSidebar()  { return document.querySelector('[data-testid="stSidebar"]'); }
-        function getMainBlock(){ return document.querySelector('[data-testid="stAppViewContainer"] > section.main') ||
-                                        document.querySelector('.main > .block-container'); }
-
-        function isSidebarOpen() {
-            var sb = getSidebar();
-            if (!sb) return false;
-            // Check inline transform set by our own close logic
-            if (sb._vvClosed) return false;
-            // Check Streamlit's aria attribute (set when Streamlit collapses it natively)
-            var exp = sb.getAttribute('aria-expanded');
-            if (exp !== null) return exp !== 'false';
-            return sb.getBoundingClientRect().width > 80;
-        }
-
-        function openSidebar() {
-            var sb = getSidebar();
-            if (!sb) return;
-            sb._vvClosed = false;
-            sb.style.transition  = 'transform 0.3s ease, margin-left 0.3s ease';
-            sb.style.transform   = 'translateX(0)';
-            sb.style.marginLeft  = '0';
-            sb.style.visibility  = 'visible';
-            sb.style.position    = 'relative';
-            sb.style.display     = '';
-        }
-
-        function closeSidebar() {
-            var sb = getSidebar();
-            if (!sb) return;
-            sb._vvClosed = true;
-            sb.style.transition  = 'transform 0.3s ease';
-            sb.style.transform   = 'translateX(-110%)';
-        }
-
-        function syncTab() {
-            var tab  = document.getElementById('vv-sidebar-tab');
-            var chev = document.getElementById('vv-chev');
-            if (!tab || !chev) return;
-            var open = isSidebarOpen();
-            var sb   = getSidebar();
-            var sw   = (open && sb) ? sb.getBoundingClientRect().width : 0;
-            if (sw < 80) sw = 0;
-            tab.style.left = sw + 'px';
-            chev.setAttribute('points', open ? '15,6 9,12 15,18' : '9,6 15,12 9,18');
-        }
-
-        window.vvToggle = function() {
-            if (isSidebarOpen()) { closeSidebar(); }
-            else                 { openSidebar();  }
-            setTimeout(syncTab, 320);
-        };
-
-        setTimeout(syncTab, 300);
-        setTimeout(syncTab, 800);
-        setInterval(syncTab, 1000);
-    })();
-    </script>
     """, unsafe_allow_html=True)
 
     # Session state defaults
@@ -2980,4 +3006,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

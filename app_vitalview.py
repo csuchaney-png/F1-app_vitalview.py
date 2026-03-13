@@ -521,6 +521,24 @@ def init_db():
             )""")
         conn.commit()
 
+    # Seed demo accounts on every startup so they survive Streamlit Cloud redeploys.
+    # Uses INSERT OR IGNORE so existing accounts are never overwritten.
+    _demo_accounts = [
+        ("Demo User",  "demo@vitalview.com",  "demo1234",  "free"),
+        ("Pro Tester", "pro@vitalview.com",   "pro12345",  "pro"),
+        ("Admin",      "admin@vitalview.com", "admin123!", "enterprise"),
+    ]
+    for _name, _email, _pwd, _plan in _demo_accounts:
+        try:
+            with get_conn() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO users(name,email,password,plan) VALUES(?,?,?,?)",
+                    (_name, _email, hash_pw(_pwd), _plan),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
 
 def audit(email, action, detail=""):
     try:
@@ -630,6 +648,10 @@ def verify_login(email, password):
 
 
 def start_reset(email):
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
     email = email.strip().lower()
     if not get_user(email):
         return False, "No account found with that email."
@@ -642,7 +664,49 @@ def start_reset(email):
             (email, code, exp),
         )
         conn.commit()
-    return True, code
+
+    # Send reset email via Gmail SMTP
+    gmail_user = st.secrets.get("GMAIL_USER", os.getenv("GMAIL_USER", "vitalviewchi@gmail.com"))
+    gmail_pwd  = st.secrets.get("GMAIL_APP_PASSWORD", os.getenv("GMAIL_APP_PASSWORD", ""))
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = "VitalView — Your Password Reset Code"
+        msg["From"]    = f"VitalView <{gmail_user}>"
+        msg["To"]      = email
+
+        html_body = f"""
+        <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;
+                    background:#111827;color:#f0f4ff;border-radius:12px;
+                    padding:2rem;border:1px solid #2d3a52;">
+            <div style="font-size:1.4rem;font-weight:800;color:#1a8fff;
+                        margin-bottom:0.5rem;">VitalView</div>
+            <div style="font-size:1rem;margin-bottom:1.5rem;color:#8899bb;">
+                Community Health Intelligence Platform
+            </div>
+            <p>You requested a password reset. Use the code below —
+               it expires in <b>15 minutes</b>.</p>
+            <div style="font-size:2rem;font-weight:800;letter-spacing:0.25em;
+                        text-align:center;padding:1.25rem;margin:1.5rem 0;
+                        background:#1c2333;border-radius:10px;
+                        border:2px solid #1a8fff;color:#00d4ff;">
+                {code}
+            </div>
+            <p style="font-size:0.8rem;color:#8899bb;">
+                If you didn't request this, you can safely ignore this email.
+            </p>
+        </div>"""
+
+        msg.attach(MIMEText(html_body, "html"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(gmail_user, gmail_pwd)
+            server.sendmail(gmail_user, email, msg.as_string())
+
+        return True, "Reset code sent! Check your email (and spam folder)."
+    except Exception as e:
+        logger.error("Email send failed: %s", e)
+        return False, "Could not send reset email. Please contact support@vitalview.health."
 
 
 def finish_reset(email, code, newpwd):
@@ -1216,7 +1280,10 @@ def tab_upload():
     try:
         df = load_file(uploaded)
     except ValueError as e:
-        st.error(str(e))
+        st.error(f"⚠️ Could not read file: {e}")
+        return
+    except Exception:
+        st.error("⚠️ Something went wrong reading that file. Make sure it's a valid CSV or Excel file and try again.")
         return
 
     if df is None or df.empty:
@@ -1300,7 +1367,10 @@ def tab_equity_scanner():
     try:
         df_raw = load_file(gap_file)
     except ValueError as e:
-        st.error(str(e))
+        st.error(f"⚠️ Could not read file: {e}")
+        return
+    except Exception:
+        st.error("⚠️ Something went wrong reading that file. Make sure it's a valid CSV or Excel file and try again.")
         return
 
     if df_raw is None or df_raw.empty:
@@ -1615,7 +1685,10 @@ def tab_map(df):
     # ── COUNTY MAP ────────────────────────────────────────────
     if "County" in map_type:
         if is_schema:
-            latest    = int(df_map["year"].max())
+            latest    = int(df_map["year"].max()) if "year" in df_map.columns and not df_map["year"].isna().all() else None
+            if latest is None:
+                st.warning("⚠️ No valid year data found in this file.")
+                return
             df_l      = df_map[df_map["year"] == latest]
             inds      = sorted(df_l["indicator"].dropna().unique().tolist())
             indicator = st.selectbox("Indicator to map", inds, key="map_indicator")
@@ -1779,7 +1852,10 @@ def tab_zip_heatmap():
     try:
         df_zip = load_file(zip_file)
     except ValueError as e:
-        st.error(str(e))
+        st.error(f"⚠️ Could not read file: {e}")
+        return
+    except Exception:
+        st.error("⚠️ Something went wrong reading that file. Make sure it's a valid CSV or Excel file and try again.")
         return
 
     if df_zip is None or df_zip.empty:
@@ -2073,11 +2149,14 @@ def tab_reports(df, features):
                 .sort_values("year")
             )
             if len(sub) >= 2:
-                delta = float(sub["value"].iloc[-1]) - float(sub["value"].iloc[0])
-                d     = "increased" if delta > 0 else "decreased"
-                trend_lines.append(
-                    f"- {ind} {d} by {abs(delta):.1f} over the analysis period."
-                )
+                try:
+                    delta = float(sub["value"].iloc[-1]) - float(sub["value"].iloc[0])
+                    d     = "increased" if delta > 0 else "decreased"
+                    trend_lines.append(
+                        f"- {ind} {d} by {abs(delta):.1f} over the analysis period."
+                    )
+                except Exception:
+                    pass
         draft = (
             f"{prog} — Grant Draft\n"
             + "=" * 60 + "\n\n"
@@ -2332,9 +2411,9 @@ def show_auth_page():
         if st.button("Request Code", key="rp_req"):
             ok, result = start_reset(r_email)
             if ok:
-                st.success(f"Demo code (email in production): **{result}**")
+                st.success(f"✅ {result}")
             else:
-                st.error(result)
+                st.error(f"❌ {result}")
         st.divider()
         r_code = st.text_input("Reset Code",   key="rp_code")
         r_new  = st.text_input("New Password", type="password", key="rp_new")
@@ -2772,7 +2851,7 @@ def render_sidebar(user):
                 else:
                     st.info(f"✅ Loaded {sb_upload.name} — use ZIP/Equity tabs")
             except Exception as e:
-                st.error(str(e))
+                st.error(f"⚠️ Could not load file. Check that it's a valid CSV or Excel file. ({type(e).__name__})")
 
         # ── File switcher: show loaded files as buttons ───────
         files = st.session_state.get("uploaded_files", {})

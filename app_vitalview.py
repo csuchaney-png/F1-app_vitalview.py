@@ -111,13 +111,14 @@ STRIPE_PRICE_PRO     = os.getenv("STRIPE_PRICE_PRO", "")
 STRIPE_PRICE_ENT     = os.getenv("STRIPE_PRICE_ENT", "")
 MAX_LOGIN_ATTEMPTS   = 5
 LOCKOUT_SECONDS      = 300
-VALID_PLANS          = {"free", "pro", "enterprise"}
+VALID_PLANS          = {"free", "pro", "enterprise", "educator", "admin"}
 
 PLAN_FEATURES = {
     "free":       {"exports": False, "ai_writer": False},
     "educator":   {"exports": False, "ai_writer": False},
     "pro":        {"exports": True,  "ai_writer": True},
     "enterprise": {"exports": True,  "ai_writer": True},
+    "admin":      {"exports": True,  "ai_writer": True},
 }
 
 # ================================================================
@@ -217,10 +218,19 @@ def inject_css():
         background:{T["card"]} !important;
         border-right:1px solid {T["border"]} !important;
     }}
-    [data-testid="collapsedControl"] {{
-        background:{T["card"]} !important;
-        border:1px solid {T["border"]} !important;
-        border-radius:6px !important;
+    /* Native sidebar toggle — let Streamlit manage position/visibility */
+    [data-testid="collapsedControl"] button,
+    [data-testid="stSidebarCollapsedControl"] button {{
+        background: linear-gradient(180deg, {T["primary"]} 0%, {T["accent"]} 100%) !important;
+        border-radius: 0 8px 8px 0 !important;
+        color: white !important;
+        border: none !important;
+        box-shadow: 2px 0 12px rgba(0,180,255,0.3) !important;
+    }}
+    [data-testid="collapsedControl"] button svg,
+    [data-testid="stSidebarCollapsedControl"] button svg {{
+        stroke: white !important;
+        fill: none !important;
     }}
     section[data-testid="stSidebar"] > div {{ overflow-y:auto !important; }}
 
@@ -524,9 +534,10 @@ def init_db():
     # Seed demo accounts on every startup so they survive Streamlit Cloud redeploys.
     # Uses INSERT OR IGNORE so existing accounts are never overwritten.
     _demo_accounts = [
-        ("Demo User",  "demo@vitalview.com",  "demo1234",  "free"),
-        ("Pro Tester", "pro@vitalview.com",   "pro12345",  "pro"),
-        ("Admin",      "admin@vitalview.com", "admin123!", "enterprise"),
+        ("Demo User",       "demo@vitalview.com",  "demo1234",    "free"),
+        ("Pro Tester",      "pro@vitalview.com",   "pro12345",    "pro"),
+        ("Christopher",     "admin@vitalview.com", "VVadmin2024!", "admin"),
+        ("Florida Pilot",   "pilot@vitalview.com", "pilot2024!",  "pro"),
     ]
     for _name, _email, _pwd, _plan in _demo_accounts:
         try:
@@ -666,8 +677,12 @@ def start_reset(email):
         conn.commit()
 
     # Send reset email via Gmail SMTP
-    gmail_user = st.secrets.get("GMAIL_USER", os.getenv("GMAIL_USER", "vitalviewchi@gmail.com"))
-    gmail_pwd  = st.secrets.get("GMAIL_APP_PASSWORD", os.getenv("GMAIL_APP_PASSWORD", ""))
+    try:
+        gmail_user = st.secrets.get("GMAIL_USER", os.getenv("GMAIL_USER", "vitalviewchi@gmail.com"))
+        gmail_pwd  = st.secrets.get("GMAIL_APP_PASSWORD", os.getenv("GMAIL_APP_PASSWORD", ""))
+    except Exception:
+        gmail_user = os.getenv("GMAIL_USER", "vitalviewchi@gmail.com")
+        gmail_pwd  = os.getenv("GMAIL_APP_PASSWORD", "")
 
     try:
         msg = MIMEMultipart("alternative")
@@ -2292,6 +2307,21 @@ def show_auth_page():
         unsafe_allow_html=True,
     )
 
+    # ── Pilot notice banner ──────────────────────────────────
+    st.markdown(f"""
+    <div style="max-width:820px;margin:0 auto 1.25rem auto;
+                background:#1a3a1a;border:1px solid #22c55e44;
+                border-radius:10px;padding:0.75rem 1.1rem;
+                display:flex;align-items:center;gap:0.75rem;">
+        <span style="font-size:1.1rem;">🧪</span>
+        <div style="font-size:0.78rem;color:#86efac;line-height:1.5;">
+            <b>Closed Pilot Program</b> — You're accessing an early version of VitalView.
+            Data and accounts may reset during updates. Do not store sensitive information.
+            Questions? <a href="mailto:support@vitalview.health"
+            style="color:#4ade80;">support@vitalview.health</a>
+        </div>
+    </div>""", unsafe_allow_html=True)
+
     mode = st.radio(
         "Auth mode", ["Log In", "Sign Up", "Reset Password"],
         horizontal=True, label_visibility="collapsed",
@@ -2393,10 +2423,18 @@ def show_auth_page():
             Selected: <b style='color:{selected_info["color"]};'>{selected_info["label"]} — {selected_info["price"]}</b>
         </div>""", unsafe_allow_html=True)
 
+        agreed = st.checkbox(
+            "I understand this is a pilot — accounts may reset during updates, "
+            "and I will not upload personally identifiable health information.",
+            key="su_agree"
+        )
         if st.button("Create Account", key="su_btn"):
-            ok, msg = add_user(name, email, pwd, plan)
-            st.session_state["su_result"] = (ok, msg)
-            st.rerun()
+            if not agreed:
+                st.warning("⚠️ Please read and accept the pilot terms above.")
+            else:
+                ok, msg = add_user(name, email, pwd, plan)
+                st.session_state["su_result"] = (ok, msg)
+                st.rerun()
 
         if "su_result" in st.session_state:
             ok, msg = st.session_state.pop("su_result")
@@ -2672,6 +2710,179 @@ Write in a {tone} voice. Be funder-ready, compelling, and data-grounded."""
             if st.button("🗑 Clear Draft", key="ai_clear", use_container_width=True):
                 st.session_state["ai_draft_sections"] = {}
                 st.rerun()
+
+# ================================================================
+# TAB — ADMIN PANEL (admin plan only)
+# ================================================================
+def tab_admin(user):
+    T = THEME
+
+    # Gate: admin plan only
+    if user.get("plan") != "admin":
+        st.markdown(f"""
+        <div style="max-width:480px;margin:3rem auto;text-align:center;
+                    background:{T["card"]};border:2px solid {T["danger"]}44;
+                    border-radius:16px;padding:2.5rem;">
+            <div style="font-size:2rem;margin-bottom:1rem;">🔒</div>
+            <div style="font-size:1rem;font-weight:800;color:{T["text"]};">
+                Admin access only
+            </div>
+        </div>""", unsafe_allow_html=True)
+        return
+
+    section("🛠 Admin Panel")
+
+    # ── Load all users ────────────────────────────────────────
+    try:
+        with get_conn() as conn:
+            users_raw = conn.execute(
+                "SELECT id, name, email, plan, approved, created_at FROM users ORDER BY created_at DESC"
+            ).fetchall()
+            audit_raw = conn.execute(
+                "SELECT email, action, detail, created_at FROM audit_log ORDER BY created_at DESC LIMIT 100"
+            ).fetchall()
+    except Exception as e:
+        st.error(f"Could not load admin data: {e}")
+        return
+
+    users_df = pd.DataFrame([dict(r) for r in users_raw]) if users_raw else pd.DataFrame()
+    audit_df = pd.DataFrame([dict(r) for r in audit_raw]) if audit_raw else pd.DataFrame()
+
+    # ── Summary metrics ───────────────────────────────────────
+    if not users_df.empty:
+        total     = len(users_df)
+        by_plan   = users_df["plan"].value_counts().to_dict()
+        pilot_cnt = by_plan.get("pro", 0) + by_plan.get("enterprise", 0)
+        free_cnt  = by_plan.get("free", 0)
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: metric_card("Total Users",    str(total))
+        with c2: metric_card("Pilot / Pro",    str(pilot_cnt), "paid plans")
+        with c3: metric_card("Free",           str(free_cnt))
+        with c4: metric_card("Signups Today",  str(
+            len(users_df[users_df["created_at"].str.startswith(
+                datetime.now().strftime("%Y-%m-%d"), na=False)]) if "created_at" in users_df.columns else "—"
+        ))
+
+    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+
+    # ── User management table ─────────────────────────────────
+    section("User Management")
+
+    if users_df.empty:
+        st.info("No users yet.")
+    else:
+        # Search
+        search = st.text_input("🔍 Search by name or email", key="admin_search")
+        disp   = users_df.copy()
+        if search:
+            mask = (
+                disp["name"].str.contains(search, case=False, na=False) |
+                disp["email"].str.contains(search, case=False, na=False)
+            )
+            disp = disp[mask]
+
+        for _, row in disp.iterrows():
+            with st.expander(
+                f"{'🟢' if row['approved'] else '🔴'}  {row['name']}  ·  {row['email']}  ·  {row['plan'].upper()}",
+                expanded=False
+            ):
+                c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
+                with c1:
+                    st.caption(f"Joined: {str(row['created_at'])[:16]}")
+                with c2:
+                    new_plan = st.selectbox(
+                        "Plan", ["free", "educator", "pro", "enterprise", "admin"],
+                        index=["free","educator","pro","enterprise","admin"].index(
+                            row["plan"] if row["plan"] in ["free","educator","pro","enterprise","admin"] else "free"
+                        ),
+                        key=f"plan_{row['id']}"
+                    )
+                with c3:
+                    if st.button("💾 Save Plan", key=f"save_plan_{row['id']}",
+                                 use_container_width=True):
+                        try:
+                            with get_conn() as conn:
+                                conn.execute(
+                                    "UPDATE users SET plan=? WHERE id=?",
+                                    (new_plan, row["id"])
+                                )
+                                conn.commit()
+                            st.success(f"✅ Plan updated to {new_plan}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed: {e}")
+                with c4:
+                    if row["email"] not in ("admin@vitalview.com", "demo@vitalview.com"):
+                        if st.button("🗑 Delete", key=f"del_{row['id']}",
+                                     use_container_width=True):
+                            try:
+                                with get_conn() as conn:
+                                    conn.execute("DELETE FROM users WHERE id=?", (row["id"],))
+                                    conn.commit()
+                                st.success("User deleted.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed: {e}")
+
+    # ── Pilot management ──────────────────────────────────────
+    section("Pilot Program Management")
+    st.markdown(f"""
+    <div style="background:{T["card"]};border:1px solid {T["border"]};
+                border-radius:10px;padding:1rem 1.25rem;margin-bottom:1rem;">
+        <div style="font-size:0.75rem;color:{T["muted"]};margin-bottom:0.75rem;">
+            Create a pilot account for a new organization
+        </div>""", unsafe_allow_html=True)
+
+    pc1, pc2, pc3, pc4 = st.columns([2, 2, 1, 1])
+    with pc1: p_name  = st.text_input("Org / Contact Name", key="pilot_name")
+    with pc2: p_email = st.text_input("Email",              key="pilot_email")
+    with pc3: p_plan  = st.selectbox("Plan", ["pro", "enterprise"], key="pilot_plan")
+    with pc4:
+        st.markdown("<div style='height:1.85rem'></div>", unsafe_allow_html=True)
+        if st.button("➕ Create Pilot", key="create_pilot", use_container_width=True):
+            if not p_name or not p_email:
+                st.warning("Name and email required.")
+            else:
+                import secrets as _sec
+                tmp_pwd = "Pilot" + _sec.token_hex(4).upper()
+                ok, msg = add_user(p_name, p_email, tmp_pwd, p_plan)
+                if ok:
+                    st.success(
+                        f"✅ Pilot account created!  "
+                        f"Email: **{p_email}**  |  Temp password: **{tmp_pwd}**  "
+                        f"(share securely — they can reset it)"
+                    )
+                else:
+                    st.error(msg)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── Audit log ─────────────────────────────────────────────
+    section("Audit Log (last 100 events)")
+    if audit_df.empty:
+        st.info("No audit events yet.")
+    else:
+        st.dataframe(
+            audit_df.rename(columns={
+                "email": "User", "action": "Action",
+                "detail": "Detail", "created_at": "Timestamp"
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # ── Export user list ──────────────────────────────────────
+    section("Export")
+    if not users_df.empty:
+        csv = users_df.drop(columns=["id"], errors="ignore").to_csv(index=False)
+        st.download_button(
+            "⬇ Download User List (CSV)",
+            data=csv,
+            file_name=f"vitalview_users_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+        )
+
 
 # ================================================================
 # SIDEBAR
@@ -2953,63 +3164,10 @@ def main():
         page_title="VitalView",
         page_icon="🏥",
         layout="wide",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="auto",
     )
     inject_css()
     init_db()
-
-    # Sidebar toggle — styles both the collapsed AND expanded control buttons
-    st.markdown("""
-    <style>
-    /* Works for both sidebar states: collapsed (left edge) and expanded (beside sidebar) */
-    [data-testid="collapsedControl"],
-    [data-testid="stSidebarCollapsedControl"] {
-        position: fixed !important;
-        top: 50% !important;
-        transform: translateY(-50%) !important;
-        z-index: 999999 !important;
-        width: 24px !important;
-        height: 72px !important;
-        background: linear-gradient(180deg, #1a8fff 0%, #00d4ff 100%) !important;
-        border-radius: 0 10px 10px 0 !important;
-        box-shadow: 3px 0 16px rgba(0,212,255,0.4) !important;
-        overflow: hidden !important;
-        margin: 0 !important;
-        padding: 0 !important;
-        transition: width 0.15s, box-shadow 0.15s !important;
-        left: 0 !important;
-    }
-    [data-testid="collapsedControl"]:hover,
-    [data-testid="stSidebarCollapsedControl"]:hover {
-        width: 30px !important;
-        box-shadow: 4px 0 22px rgba(0,212,255,0.65) !important;
-    }
-    [data-testid="collapsedControl"] button,
-    [data-testid="stSidebarCollapsedControl"] button {
-        width: 100% !important;
-        height: 100% !important;
-        background: transparent !important;
-        border: none !important;
-        cursor: pointer !important;
-        color: white !important;
-        padding: 0 !important;
-    }
-    [data-testid="collapsedControl"] button svg,
-    [data-testid="stSidebarCollapsedControl"] button svg {
-        width: 14px !important;
-        height: 14px !important;
-        stroke: white !important;
-        fill: none !important;
-        stroke-width: 2.5 !important;
-    }
-    /* When sidebar IS open, the toggle button sits at the sidebar's right edge */
-    [data-testid="stSidebar"][aria-expanded="true"] ~ div [data-testid="collapsedControl"],
-    [data-testid="stSidebar"][aria-expanded="true"] ~ div [data-testid="stSidebarCollapsedControl"] {
-        left: var(--sidebar-width, 21rem) !important;
-        border-radius: 0 10px 10px 0 !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
 
     # Session state defaults
     for key, default in [
@@ -3038,9 +3196,28 @@ def main():
     render_sidebar(user)
     navbar(user.get("name", ""), user.get("plan", "free"))
 
+    # ── Pilot stability banner (dismissable per session) ─────
+    if not st.session_state.get("pilot_banner_dismissed"):
+        T = THEME
+        col_msg, col_btn = st.columns([10, 1])
+        with col_msg:
+            st.markdown(f"""
+            <div style="background:#1c2a1c;border:1px solid #22c55e55;border-radius:8px;
+                        padding:0.55rem 1rem;font-size:0.78rem;color:#86efac;margin-bottom:0.5rem;">
+                🧪 <b>Pilot Mode</b> — This is an early-access version of VitalView.
+                Accounts may reset when updates are deployed. Do not upload sensitive PII.
+                Feedback? <a href="mailto:support@vitalview.health" style="color:#4ade80;">
+                support@vitalview.health</a>
+            </div>""", unsafe_allow_html=True)
+        with col_btn:
+            if st.button("✕", key="dismiss_pilot", help="Dismiss"):
+                st.session_state["pilot_banner_dismissed"] = True
+                st.rerun()
+
     df  = st.session_state.get("df",  pd.DataFrame())
     dfx = st.session_state.get("dfx", df)
 
+    is_admin  = user.get("plan") == "admin"
     tab_labels = [
         "📊  Dashboard",
         "⬆  Upload",
@@ -3050,9 +3227,6 @@ def main():
         "📝  Reports",
         "🤖  AI Grant Writer",
     ]
-    tabs = st.tabs(tab_labels)
-
-    # Wrap each tab in try/except so one error never crashes the whole app
     tab_fns = [
         lambda: tab_dashboard(dfx, features),
         tab_upload,
@@ -3062,6 +3236,11 @@ def main():
         lambda: tab_reports(dfx, features),
         lambda: tab_ai_grant(dfx, features),
     ]
+    if is_admin:
+        tab_labels.append("🛠  Admin")
+        tab_fns.append(lambda: tab_admin(user))
+
+    tabs = st.tabs(tab_labels)
     for i, (tab, fn) in enumerate(zip(tabs, tab_fns)):
         with tab:
             try:

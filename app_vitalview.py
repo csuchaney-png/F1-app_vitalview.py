@@ -7,6 +7,11 @@
 # IMPORTS
 # ================================================================
 import os, time, sqlite3, logging, json, secrets, re
+try:
+    from supabase import create_client as _sb_create
+    HAS_SUPABASE = True
+except ImportError:
+    HAS_SUPABASE = False
 from pathlib import Path
 from datetime import datetime
 from io import BytesIO
@@ -494,8 +499,33 @@ def disclaimer_banner():
     </div>""", unsafe_allow_html=True)
 
 # ================================================================
-# DATABASE
+# DATABASE — Supabase (PostgreSQL) backend
+# Falls back to SQLite if Supabase credentials are not set
 # ================================================================
+def _get_supabase_creds():
+    """Return (url, key) from secrets or env, or (None, None)."""
+    try:
+        url = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))
+        key = st.secrets.get("SUPABASE_KEY", os.getenv("SUPABASE_KEY", ""))
+    except Exception:
+        url = os.getenv("SUPABASE_URL", "")
+        key = os.getenv("SUPABASE_KEY", "")
+    return (url or "").strip(), (key or "").strip()
+
+
+def _use_supabase():
+    url, key = _get_supabase_creds()
+    return bool(url and key)
+
+
+def _sb():
+    """Return a supabase client, or raise if not available."""
+    from supabase import create_client
+    url, key = _get_supabase_creds()
+    return create_client(url, key)
+
+
+# ── SQLite fallback ───────────────────────────────────────────
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -503,7 +533,7 @@ def get_conn():
     return conn
 
 
-def init_db():
+def _init_sqlite():
     with get_conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -531,34 +561,65 @@ def init_db():
             )""")
         conn.commit()
 
-    # Seed demo accounts on every startup so they survive Streamlit Cloud redeploys.
-    # Uses INSERT OR IGNORE so existing accounts are never overwritten.
+
+def _seed_accounts():
+    """Seed demo/admin accounts — works for both Supabase and SQLite."""
     _demo_accounts = [
-        ("Demo User",       "demo@vitalview.com",  "demo1234",    "free"),
-        ("Pro Tester",      "pro@vitalview.com",   "pro12345",    "pro"),
-        ("Christopher",     "admin@vitalview.com", "VVadmin2024!", "admin"),
-        ("Florida Pilot",   "pilot@vitalview.com", "pilot2024!",  "pro"),
+        ("Demo User",     "demo@vitalview.com",  "demo1234",    "free"),
+        ("Pro Tester",    "pro@vitalview.com",   "pro12345",    "pro"),
+        ("Christopher",   "admin@vitalview.com", "VVadmin2024!", "admin"),
+        ("Florida Pilot", "pilot@vitalview.com", "pilot2024!",  "pro"),
     ]
     for _name, _email, _pwd, _plan in _demo_accounts:
         try:
-            with get_conn() as conn:
-                conn.execute(
-                    "INSERT OR IGNORE INTO users(name,email,password,plan) VALUES(?,?,?,?)",
-                    (_name, _email, hash_pw(_pwd), _plan),
-                )
-                conn.commit()
+            if _use_supabase():
+                sb = _sb()
+                existing = sb.table("users").select("id").eq("email", _email).execute()
+                if not existing.data:
+                    sb.table("users").insert({
+                        "name": _name, "email": _email,
+                        "password": hash_pw(_pwd), "plan": _plan, "approved": True
+                    }).execute()
+            else:
+                with get_conn() as conn:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO users(name,email,password,plan) VALUES(?,?,?,?)",
+                        (_name, _email, hash_pw(_pwd), _plan),
+                    )
+                    conn.commit()
         except Exception:
             pass
 
 
+def init_db():
+    if _use_supabase():
+        # Tables must exist in Supabase — created via SQL editor
+        # Just seed the accounts
+        try:
+            _seed_accounts()
+            logger.info("Supabase backend active")
+        except Exception as e:
+            logger.warning("Supabase seed failed, falling back to SQLite: %s", e)
+            _init_sqlite()
+            _seed_accounts()
+    else:
+        _init_sqlite()
+        _seed_accounts()
+
+
 def audit(email, action, detail=""):
     try:
-        with get_conn() as conn:
-            conn.execute(
-                "INSERT INTO audit_log(email,action,detail) VALUES(?,?,?)",
-                (email, action, detail),
-            )
-            conn.commit()
+        if _use_supabase():
+            _sb().table("audit_log").insert({
+                "email": email, "action": action, "detail": detail
+            }).execute()
+        else:
+            with get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO audit_log(email,action,detail) VALUES(?,?,?)",
+                    (email, action, detail),
+                )
+                conn.commit()
     except Exception as e:
         logger.warning("Audit log failed: %s", e)
 
@@ -619,26 +680,45 @@ def add_user(name, email, password, plan="free"):
     if plan not in VALID_PLANS:
         return False, f"Invalid plan: {plan}"
     try:
-        with get_conn() as conn:
-            conn.execute(
-                "INSERT INTO users(name,email,password,plan) VALUES(?,?,?,?)",
-                (name, email, hash_pw(password), plan),
-            )
-            conn.commit()
+        if _use_supabase():
+            sb = _sb()
+            existing = sb.table("users").select("id").eq("email", email).execute()
+            if existing.data:
+                return False, "An account with that email already exists."
+            sb.table("users").insert({
+                "name": name, "email": email,
+                "password": hash_pw(password), "plan": plan, "approved": True
+            }).execute()
+        else:
+            with get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO users(name,email,password,plan) VALUES(?,?,?,?)",
+                    (name, email, hash_pw(password), plan),
+                )
+                conn.commit()
         audit(email, "signup", plan)
         return True, "Account created successfully."
-    except sqlite3.IntegrityError:
-        return False, "An account with that email already exists."
     except Exception as e:
+        err = str(e)
+        if "duplicate" in err.lower() or "unique" in err.lower():
+            return False, "An account with that email already exists."
         return False, f"Error: {e}"
 
 
 def get_user(email):
-    with get_conn() as conn:
-        return conn.execute(
-            "SELECT * FROM users WHERE email=?",
-            (email.strip().lower(),),
-        ).fetchone()
+    email = email.strip().lower()
+    try:
+        if _use_supabase():
+            res = _sb().table("users").select("*").eq("email", email).execute()
+            return res.data[0] if res.data else None
+        else:
+            with get_conn() as conn:
+                return conn.execute(
+                    "SELECT * FROM users WHERE email=?", (email,)
+                ).fetchone()
+    except Exception as e:
+        logger.warning("get_user error: %s", e)
+        return None
 
 
 def verify_login(email, password):
@@ -668,13 +748,20 @@ def start_reset(email):
         return False, "No account found with that email."
     code = secrets.token_hex(3).upper()
     exp  = int(time.time()) + 900
-    with get_conn() as conn:
-        conn.execute("DELETE FROM password_resets WHERE email=?", (email,))
-        conn.execute(
-            "INSERT INTO password_resets(email,code,expires) VALUES(?,?,?)",
-            (email, code, exp),
-        )
-        conn.commit()
+    if _use_supabase():
+        sb = _sb()
+        sb.table("password_resets").delete().eq("email", email).execute()
+        sb.table("password_resets").insert({
+            "email": email, "code": code, "expires": exp
+        }).execute()
+    else:
+        with get_conn() as conn:
+            conn.execute("DELETE FROM password_resets WHERE email=?", (email,))
+            conn.execute(
+                "INSERT INTO password_resets(email,code,expires) VALUES(?,?,?)",
+                (email, code, exp),
+            )
+            conn.commit()
 
     # Send reset email via Gmail SMTP
     try:
@@ -728,25 +815,37 @@ def finish_reset(email, code, newpwd):
     email, code = email.strip().lower(), code.strip().upper()
     if not (email and code and newpwd):
         return False, "All fields are required."
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT code,expires FROM password_resets WHERE email=?",
-            (email,),
-        ).fetchone()
-        if not row:
-            return False, "No reset request found for this email."
-        if code != row["code"]:
-            return False, "Invalid reset code."
-        if time.time() > row["expires"]:
-            return False, "Reset code has expired. Please request a new one."
-        conn.execute(
-            "UPDATE users SET password=? WHERE email=?",
-            (hash_pw(newpwd), email),
-        )
-        conn.execute("DELETE FROM password_resets WHERE email=?", (email,))
-        conn.commit()
-    audit(email, "password_reset")
-    return True, "Password updated. Please log in with your new password."
+    try:
+        if _use_supabase():
+            sb  = _sb()
+            res = sb.table("password_resets").select("code,expires").eq("email", email).execute()
+            if not res.data:
+                return False, "No reset request found for this email."
+            row = res.data[0]
+            if code != row["code"]:
+                return False, "Invalid reset code."
+            if time.time() > row["expires"]:
+                return False, "Reset code has expired. Please request a new one."
+            sb.table("users").update({"password": hash_pw(newpwd)}).eq("email", email).execute()
+            sb.table("password_resets").delete().eq("email", email).execute()
+        else:
+            with get_conn() as conn:
+                row = conn.execute(
+                    "SELECT code,expires FROM password_resets WHERE email=?", (email,)
+                ).fetchone()
+                if not row:
+                    return False, "No reset request found for this email."
+                if code != row["code"]:
+                    return False, "Invalid reset code."
+                if time.time() > row["expires"]:
+                    return False, "Reset code has expired. Please request a new one."
+                conn.execute("UPDATE users SET password=? WHERE email=?", (hash_pw(newpwd), email))
+                conn.execute("DELETE FROM password_resets WHERE email=?", (email,))
+                conn.commit()
+        audit(email, "password_reset")
+        return True, "Password updated. Please log in with your new password."
+    except Exception as e:
+        return False, f"Reset failed: {e}"
 
 # ================================================================
 # DATA HELPERS
@@ -2734,19 +2833,28 @@ def tab_admin(user):
 
     # ── Load all users ────────────────────────────────────────
     try:
-        with get_conn() as conn:
-            users_raw = conn.execute(
-                "SELECT id, name, email, plan, approved, created_at FROM users ORDER BY created_at DESC"
-            ).fetchall()
-            audit_raw = conn.execute(
-                "SELECT email, action, detail, created_at FROM audit_log ORDER BY created_at DESC LIMIT 100"
-            ).fetchall()
+        if _use_supabase():
+            sb = _sb()
+            users_raw = sb.table("users").select(
+                "id,name,email,plan,approved,created_at"
+            ).order("created_at", desc=True).execute().data or []
+            audit_raw = sb.table("audit_log").select(
+                "email,action,detail,created_at"
+            ).order("created_at", desc=True).limit(100).execute().data or []
+        else:
+            with get_conn() as conn:
+                users_raw = [dict(r) for r in conn.execute(
+                    "SELECT id, name, email, plan, approved, created_at FROM users ORDER BY created_at DESC"
+                ).fetchall()]
+                audit_raw = [dict(r) for r in conn.execute(
+                    "SELECT email, action, detail, created_at FROM audit_log ORDER BY created_at DESC LIMIT 100"
+                ).fetchall()]
     except Exception as e:
         st.error(f"Could not load admin data: {e}")
         return
 
-    users_df = pd.DataFrame([dict(r) for r in users_raw]) if users_raw else pd.DataFrame()
-    audit_df = pd.DataFrame([dict(r) for r in audit_raw]) if audit_raw else pd.DataFrame()
+    users_df = pd.DataFrame(users_raw) if users_raw else pd.DataFrame()
+    audit_df = pd.DataFrame(audit_raw) if audit_raw else pd.DataFrame()
 
     # ── Summary metrics ───────────────────────────────────────
     if not users_df.empty:
@@ -2802,12 +2910,17 @@ def tab_admin(user):
                     if st.button("💾 Save Plan", key=f"save_plan_{row['id']}",
                                  use_container_width=True):
                         try:
-                            with get_conn() as conn:
-                                conn.execute(
-                                    "UPDATE users SET plan=? WHERE id=?",
-                                    (new_plan, row["id"])
-                                )
-                                conn.commit()
+                            if _use_supabase():
+                                _sb().table("users").update(
+                                    {"plan": new_plan}
+                                ).eq("id", row["id"]).execute()
+                            else:
+                                with get_conn() as conn:
+                                    conn.execute(
+                                        "UPDATE users SET plan=? WHERE id=?",
+                                        (new_plan, row["id"])
+                                    )
+                                    conn.commit()
                             st.success(f"✅ Plan updated to {new_plan}")
                             st.rerun()
                         except Exception as e:
@@ -2817,9 +2930,12 @@ def tab_admin(user):
                         if st.button("🗑 Delete", key=f"del_{row['id']}",
                                      use_container_width=True):
                             try:
-                                with get_conn() as conn:
-                                    conn.execute("DELETE FROM users WHERE id=?", (row["id"],))
-                                    conn.commit()
+                                if _use_supabase():
+                                    _sb().table("users").delete().eq("id", row["id"]).execute()
+                                else:
+                                    with get_conn() as conn:
+                                        conn.execute("DELETE FROM users WHERE id=?", (row["id"],))
+                                        conn.commit()
                                 st.success("User deleted.")
                                 st.rerun()
                             except Exception as e:

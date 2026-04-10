@@ -2741,11 +2741,11 @@ Write in a {tone} voice. Be funder-ready, compelling, and data-grounded."""
                         "content-type": "application/json",
                     },
                     json={
-                        "model": "claude-sonnet-4-20250514",
-                        "max_tokens": 4000,
+                        "model": "claude-haiku-4-5-20251001",
+                        "max_tokens": 2000,
                         "messages": [{"role": "user", "content": prompt}],
                     },
-                    timeout=60,
+                    timeout=120,
                 )
                 if resp.status_code == 200:
                     draft = resp.json()["content"][0]["text"]
@@ -3280,7 +3280,7 @@ def main():
         page_title="VitalView",
         page_icon="🏥",
         layout="wide",
-        initial_sidebar_state="auto",
+        initial_sidebar_state="expanded",
     )
     inject_css()
     init_db()

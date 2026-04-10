@@ -928,7 +928,10 @@ def safe_csv(df):
         if isinstance(x, str) and x and x[0] in "=+-@":
             return "'" + x
         return x
-    return df.applymap(esc).to_csv(index=False).encode("utf-8")
+    try:
+        return df.map(esc).to_csv(index=False).encode("utf-8")
+    except AttributeError:
+        return df.applymap(esc).to_csv(index=False).encode("utf-8")
 
 
 def to_excel(df):

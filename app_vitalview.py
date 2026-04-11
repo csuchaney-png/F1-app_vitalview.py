@@ -199,6 +199,28 @@ def inject_css():
     @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500&family=Mulish:wght@300;400;500;600&display=swap');
 
     html, body, [class*="css"] {{ font-family: 'Mulish', sans-serif !important; }}
+
+    /* ── Force sidebar always visible ── */
+    section[data-testid="stSidebar"] {{
+        display: block !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        transform: none !important;
+        min-width: 280px !important;
+        max-width: 320px !important;
+        position: relative !important;
+    }}
+    section[data-testid="stSidebar"][aria-expanded="false"] {{
+        display: block !important;
+        min-width: 280px !important;
+    }}
+    /* Hide the collapse arrow button */
+    button[data-testid="collapsedControl"] {{
+        display: none !important;
+    }}
+    [data-testid="stSidebarCollapseButton"] {{
+        display: none !important;
+    }}
     .stApp {{
         background: radial-gradient(ellipse at 15% 20%, #0d2040 0%, {T["bg"]} 45%),
                     radial-gradient(ellipse at 85% 80%, #001a35 0%, {T["bg"]} 50%) !important;

@@ -2633,10 +2633,29 @@ def tab_ai_grant(df, features):
         prog_name  = st.text_input("Program / Initiative Name",
                                    value="Community Health Equity Initiative",
                                    key="ai_prog")
-        funder     = st.selectbox("Target Funder Type",
-                                  ["HRSA","SAMHSA","CDC","Robert Wood Johnson Foundation",
-                                   "Kellogg Foundation","Local Government","Other"],
-                                  key="ai_funder")
+        # ── Custom funder dropdown ────────────────────────────
+        DEFAULT_FUNDERS = [
+            "HRSA","SAMHSA","CDC","Robert Wood Johnson Foundation",
+            "Kellogg Foundation","Health Foundation of South Florida",
+            "United Way","Local Government","Other"
+        ]
+        if "custom_funders" not in st.session_state:
+            st.session_state["custom_funders"] = []
+        all_funders = DEFAULT_FUNDERS + st.session_state["custom_funders"]
+
+        funder = st.selectbox("Target Funder Type", all_funders, key="ai_funder")
+
+        # Add custom funder
+        new_funder = st.text_input("➕ Add custom funder", placeholder="e.g. Peacock Foundation",
+                                   key="ai_new_funder")
+        if st.button("Add Funder", key="ai_add_funder"):
+            nf = new_funder.strip()
+            if nf and nf not in all_funders:
+                st.session_state["custom_funders"].append(nf)
+                st.success(f"✅ '{nf}' added to funder list!")
+                st.rerun()
+            elif nf in all_funders:
+                st.warning("That funder is already in the list.")
         grant_type = st.selectbox("Grant Type",
                                   ["Community Health Needs Assessment","Substance Use",
                                    "Mental Health","Food Access","Housing & Health",

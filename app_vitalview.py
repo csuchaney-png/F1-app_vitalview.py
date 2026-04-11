@@ -3348,15 +3348,42 @@ Format each section with ## [SECTION NAME] followed by the content."""
                     raw = resp.json()["content"][0]["text"]
                     # Parse sections
                     import re as _re
+
+                    def _clean_md(t):
+                        """Strip markdown so PDF renders cleanly."""
+                        # Remove markdown tables — convert to plain bullet list
+                        def _table_to_bullets(m):
+                            lines = m.group(0).strip().split("\n")
+                            out   = []
+                            for ln in lines:
+                                cells = [c.strip() for c in ln.split("|") if c.strip()]
+                                if cells and not all(set(c) <= set("-: ") for c in cells):
+                                    out.append("  ".join(cells))
+                            return "\n".join(out)
+                        t = _re.sub(r"(\|.+\|\n?)+", _table_to_bullets, t)
+                        # Strip other markdown
+                        t = _re.sub(r"\*\*(.+?)\*\*", r"\1", t)
+                        t = _re.sub(r"\*(.+?)\*",       r"\1", t)
+                        t = _re.sub(r"^#{1,6}\s+",       "",     t, flags=_re.MULTILINE)
+                        t = _re.sub(r"^-{2,}\s*$",       "",     t, flags=_re.MULTILINE)
+                        t = _re.sub(r"^-\s+",            "• ",   t, flags=_re.MULTILINE)
+                        t = _re.sub(r"^#+\s*",           "",     t, flags=_re.MULTILINE)
+                        t = _re.sub(r"`(.+?)`",           r"\1", t)
+                        t = _re.sub(r"\[(.+?)\]\(.+?\)", r"\1", t)
+                        # Clean up excessive blank lines
+                        t = _re.sub(r"\n{3,}", "\n\n", t)
+                        return t.strip()
+
                     parts = _re.split(r"(?m)^##\s+", raw)
                     results = {}
                     for part in parts:
                         if not part.strip():
                             continue
                         lines   = part.strip().split("\n", 1)
-                        heading = lines[0].strip()
-                        body    = lines[1].strip() if len(lines) > 1 else ""
-                        results[heading] = body
+                        heading = _clean_md(lines[0].strip())
+                        body    = _clean_md(lines[1].strip()) if len(lines) > 1 else ""
+                        if heading:
+                            results[heading] = body
                     st.session_state["gf_results"] = {
                         "sections": results,
                         "raw": raw,

@@ -3437,63 +3437,90 @@ Format each section with ## [SECTION NAME] followed by the content."""
                     sections = saved_data.get("sections", {})
                     section_list = list(sections.items())
 
-                    # Page 1 overlay — cover info
-                    c.setFont("Helvetica-Bold", 9)
-                    c.setFillColor(colors.HexColor("#003087"))
-                    c.drawString(72, page_h - 72,
-                        f"Organization: {saved_data.get('org','')}  |  "
-                        f"Program: {saved_data.get('prog','')}  |  "
-                        f"Generated: {saved_data.get('ts','')}")
-                    c.showPage()
+                    import re as _rmd_ov
+                    def _strip_md(t):
+                        t = _rmd_ov.sub(r'\*\*(.+?)\*\*', r'\1', t)
+                        t = _rmd_ov.sub(r'\*(.+?)\*',       r'\1', t)
+                        t = _rmd_ov.sub(r'^#{1,6}\s+',       '',    t, flags=_rmd_ov.MULTILINE)
+                        t = _rmd_ov.sub(r'^-{2,}\s*$',       '',    t, flags=_rmd_ov.MULTILINE)
+                        t = _rmd_ov.sub(r'^-\s+',            '• ',  t, flags=_rmd_ov.MULTILINE)
+                        t = _rmd_ov.sub(r'^#+\s*',           '',    t, flags=_rmd_ov.MULTILINE)
+                        return t.strip()
 
-                    # One overlay page per original page
-                    num_orig_pages = len(original_reader.pages)
-                    sections_per_page = max(1, len(section_list) // max(num_orig_pages - 1, 1))
-
-                    for page_idx in range(1, num_orig_pages):
-                        start = (page_idx - 1) * sections_per_page
-                        end   = start + sections_per_page
-                        page_sections = section_list[start:end]
-
-                        y = page_h - 100
-                        for heading, body in page_sections:
-                            if y < 80:
-                                c.showPage()
-                                y = page_h - 72
-                            # Section heading
-                            c.setFont("Helvetica-Bold", 8)
-                            c.setFillColor(colors.HexColor("#003087"))
-                            c.drawString(72, y, heading[:80])
-                            y -= 14
-                            # Body text — wrap lines
-                            c.setFont("Helvetica", 8)
-                            c.setFillColor(colors.black)
-                            max_chars = 100
-                            import re as _rmd2
-                            clean = body
-                            clean = _rmd2.sub(r'\*\*(.+?)\*\*', r'\1', clean)
-                            clean = _rmd2.sub(r'\*(.+?)\*',   r'\1', clean)
-                            clean = _rmd2.sub(r'^#{1,6}\s+',   '',    clean, flags=_rmd2.MULTILINE)
-                            clean = _rmd2.sub(r'^-\s+',        '• ',  clean, flags=_rmd2.MULTILINE)
-                            words = clean.split()
-                            line  = ""
-                            for word in words:
-                                if len(line + " " + word) <= max_chars:
-                                    line = (line + " " + word).strip()
-                                else:
-                                    if y < 72:
-                                        c.showPage()
-                                        y = page_h - 72
-                                    c.drawString(72, y, line)
-                                    y -= 11
-                                    line = word
-                            if line:
-                                if y < 72:
+                    def _draw_wrapped(c, text, x, y, max_w, font, size, min_y, page_h):
+                        """Draw wrapped text, returning final y position."""
+                        c.setFont(font, size)
+                        words = text.split()
+                        line  = ""
+                        for word in words:
+                            test = (line + " " + word).strip()
+                            if c.stringWidth(test, font, size) <= max_w:
+                                line = test
+                            else:
+                                if y < min_y:
                                     c.showPage()
                                     y = page_h - 72
-                                c.drawString(72, y, line)
-                                y -= 11
-                            y -= 8  # gap between sections
+                                    c.setFont(font, size)
+                                c.drawString(x, y, line)
+                                y -= size + 3
+                                line = word
+                        if line:
+                            if y < min_y:
+                                c.showPage()
+                                y = page_h - 72
+                                c.setFont(font, size)
+                            c.drawString(x, y, line)
+                            y -= size + 3
+                        return y
+
+                    # Build one continuous overlay with all sections
+                    # Starting after page 1 (cover page of original)
+                    y = page_h - 110  # start below original header
+                    margin_x = 76
+                    text_w   = page_w - 2 * margin_x
+                    min_y    = 72
+
+                    # Page 1: just org/program info overlay
+                    c.setFont("Helvetica-Bold", 9)
+                    c.setFillColor(colors.HexColor("#003087"))
+                    org  = saved_data.get("org", "")
+                    prog = saved_data.get("prog", "")
+                    ts   = saved_data.get("ts", "")
+                    c.drawString(margin_x, page_h - 90,
+                                 f"Applicant: {org}  |  Program: {prog}  |  VitalView {ts}")
+                    c.showPage()
+
+                    # Pages 2+: one section per original form page where possible
+                    num_orig   = len(original_reader.pages)
+                    items      = list(section_list)
+                    per_page   = max(1, len(items) // max(num_orig - 1, 1))
+
+                    for page_idx in range(1, num_orig):
+                        start        = (page_idx - 1) * per_page
+                        end          = min(start + per_page, len(items))
+                        page_secs    = items[start:end]
+                        y            = page_h - 110
+
+                        for heading, body in page_secs:
+                            clean_h = _strip_md(heading)
+                            clean_b = _strip_md(body)
+
+                            if y < min_y + 30:
+                                c.showPage()
+                                y = page_h - 72
+
+                            # Draw section label
+                            c.setFont("Helvetica-Bold", 8.5)
+                            c.setFillColor(colors.HexColor("#003087"))
+                            c.drawString(margin_x, y, clean_h[:90])
+                            y -= 13
+
+                            # Draw body
+                            c.setFillColor(colors.black)
+                            y = _draw_wrapped(c, clean_b, margin_x, y,
+                                              text_w, "Helvetica", 8, min_y, page_h)
+                            y -= 10  # section gap
+
                         c.showPage()
 
                     c.save()
@@ -3553,18 +3580,26 @@ Format each section with ## [SECTION NAME] followed by the content."""
             story.append(Spacer(1, 0.2*inch))
 
             for heading, body in saved_data.get("sections", {}).items():
-                story.append(Paragraph(heading, h1_s))
+                import re as _rmdh
+                clean_heading = _rmdh.sub(r'^#+\s*', '', heading).strip()
+                clean_heading = _rmdh.sub(r'\*\*(.+?)\*\*', r'\1', clean_heading)
+                story.append(Paragraph(clean_heading, h1_s))
                 story.append(HRFlowable(width="100%", thickness=0.5,
                                         color=colors.HexColor("#cccccc")))
                 # Safely escape body text for ReportLab
                 import re as _rmd
-                # Strip markdown formatting
+                # Strip ALL markdown formatting
                 clean_body = body
                 clean_body = _rmd.sub(r'\*\*(.+?)\*\*', r'\1', clean_body)  # bold
-                clean_body = _rmd.sub(r'\*(.+?)\*',   r'\1', clean_body)  # italic
-                clean_body = _rmd.sub(r'^#{1,6}\s+',   '',     clean_body, flags=_rmd.MULTILINE)  # headers
-                clean_body = _rmd.sub(r'^-\s+',        '• ',   clean_body, flags=_rmd.MULTILINE)  # bullets
-                clean_body = _rmd.sub(r'^\d+\.\s+',  '',     clean_body, flags=_rmd.MULTILINE)  # numbered
+                clean_body = _rmd.sub(r'\*(.+?)\*',       r'\1', clean_body)  # italic
+                clean_body = _rmd.sub(r'^#{1,6}\s+',       '',     clean_body, flags=_rmd.MULTILINE)  # headers
+                clean_body = _rmd.sub(r'^-{2,}\s*$',       '',     clean_body, flags=_rmd.MULTILINE)  # --- hr
+                clean_body = _rmd.sub(r'^-\s+',            '• ',   clean_body, flags=_rmd.MULTILINE)  # bullets
+                clean_body = _rmd.sub(r'^\d+\.\s+',      '',     clean_body, flags=_rmd.MULTILINE)  # numbered
+                clean_body = _rmd.sub(r'`(.+?)`',           r'\1', clean_body)  # inline code
+                clean_body = _rmd.sub(r'\[(.+?)\]\(.+?\)', r'\1', clean_body)  # links
+                # Remove any remaining # at start of lines
+                clean_body = _rmd.sub(r'^#+\s*',           '',     clean_body, flags=_rmd.MULTILINE)
                 clean_body = clean_body.strip()
                 safe_body = (clean_body
                     .replace("&", "&amp;")

@@ -3469,7 +3469,13 @@ Format each section with ## [SECTION NAME] followed by the content."""
                             c.setFont("Helvetica", 8)
                             c.setFillColor(colors.black)
                             max_chars = 100
-                            words = body.split()
+                            import re as _rmd2
+                            clean = body
+                            clean = _rmd2.sub(r'\*\*(.+?)\*\*', r'\1', clean)
+                            clean = _rmd2.sub(r'\*(.+?)\*',   r'\1', clean)
+                            clean = _rmd2.sub(r'^#{1,6}\s+',   '',    clean, flags=_rmd2.MULTILINE)
+                            clean = _rmd2.sub(r'^-\s+',        '• ',  clean, flags=_rmd2.MULTILINE)
+                            words = clean.split()
                             line  = ""
                             for word in words:
                                 if len(line + " " + word) <= max_chars:
@@ -3494,15 +3500,23 @@ Format each section with ## [SECTION NAME] followed by the content."""
                     overlay_buf.seek(0)
                     overlay_reader = PdfReader(overlay_buf)
 
-                    # Merge original pages with overlays
+                    # Merge: overlay answers OVER original form pages
+                    num_overlay = len(overlay_reader.pages)
                     for i, orig_page in enumerate(original_reader.pages):
-                        if i < len(overlay_reader.pages):
+                        if i < num_overlay:
+                            # Scale overlay to match original page dimensions
                             orig_page.merge_page(overlay_reader.pages[i])
                         writer.add_page(orig_page)
 
-                    writer.write(buf)
-                    buf.seek(0)
-                    return buf.getvalue()
+                    # If we generated more overlay pages than original, append them
+                    if num_overlay > len(original_reader.pages):
+                        for i in range(len(original_reader.pages), num_overlay):
+                            writer.add_page(overlay_reader.pages[i])
+
+                    output_buf = _io.BytesIO()
+                    writer.write(output_buf)
+                    output_buf.seek(0)
+                    return output_buf.getvalue()
 
                 except Exception:
                     pass  # Fall through to standalone PDF
@@ -3543,7 +3557,16 @@ Format each section with ## [SECTION NAME] followed by the content."""
                 story.append(HRFlowable(width="100%", thickness=0.5,
                                         color=colors.HexColor("#cccccc")))
                 # Safely escape body text for ReportLab
-                safe_body = (body
+                import re as _rmd
+                # Strip markdown formatting
+                clean_body = body
+                clean_body = _rmd.sub(r'\*\*(.+?)\*\*', r'\1', clean_body)  # bold
+                clean_body = _rmd.sub(r'\*(.+?)\*',   r'\1', clean_body)  # italic
+                clean_body = _rmd.sub(r'^#{1,6}\s+',   '',     clean_body, flags=_rmd.MULTILINE)  # headers
+                clean_body = _rmd.sub(r'^-\s+',        '• ',   clean_body, flags=_rmd.MULTILINE)  # bullets
+                clean_body = _rmd.sub(r'^\d+\.\s+',  '',     clean_body, flags=_rmd.MULTILINE)  # numbered
+                clean_body = clean_body.strip()
+                safe_body = (clean_body
                     .replace("&", "&amp;")
                     .replace("<", "&lt;")
                     .replace(">", "&gt;"))

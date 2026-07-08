@@ -8,7 +8,7 @@
 # ================================================================
 import os, time, sqlite3, logging, json, secrets, re
 try:
-    from supabase import create_client as _sb_create
+    from supabase import create_client as _sb_create  # type: ignore
     HAS_SUPABASE = True
 except ImportError:
     HAS_SUPABASE = False
@@ -199,28 +199,6 @@ def inject_css():
     @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500&family=Mulish:wght@300;400;500;600&display=swap');
 
     html, body, [class*="css"] {{ font-family: 'Mulish', sans-serif !important; }}
-
-    /* ── Force sidebar always visible ── */
-    section[data-testid="stSidebar"] {{
-        display: block !important;
-        visibility: visible !important;
-        opacity: 1 !important;
-        transform: none !important;
-        min-width: 280px !important;
-        max-width: 320px !important;
-        position: relative !important;
-    }}
-    section[data-testid="stSidebar"][aria-expanded="false"] {{
-        display: block !important;
-        min-width: 280px !important;
-    }}
-    /* Hide the collapse arrow button */
-    button[data-testid="collapsedControl"] {{
-        display: none !important;
-    }}
-    [data-testid="stSidebarCollapseButton"] {{
-        display: none !important;
-    }}
     .stApp {{
         background: radial-gradient(ellipse at 15% 20%, #0d2040 0%, {T["bg"]} 45%),
                     radial-gradient(ellipse at 85% 80%, #001a35 0%, {T["bg"]} 50%) !important;
@@ -240,29 +218,49 @@ def inject_css():
         background:radial-gradient(circle, #00d4ff12 0%, transparent 70%);
         pointer-events:none; z-index:0;
     }}
-    #MainMenu, footer, header {{ visibility:hidden; }}
+#MainMenu {{ visibility:hidden; }}
+    footer {{ visibility:hidden; }}
+    header {{ visibility:hidden; }}
+
     [data-testid="stSidebar"] {{
         background:{T["card"]} !important;
         border-right:1px solid {T["border"]} !important;
+        display:flex !important;
+        visibility:visible !important;
+        opacity:1 !important;
+        min-width:18rem !important;
+        max-width:22rem !important;
+        transform:translateX(0) !important;
+        position:relative !important;
+        z-index:1 !important;
     }}
-    /* Native sidebar toggle — let Streamlit manage position/visibility */
-    [data-testid="collapsedControl"] button,
-    [data-testid="stSidebarCollapsedControl"] button {{
-        background: linear-gradient(180deg, {T["primary"]} 0%, {T["accent"]} 100%) !important;
-        border-radius: 0 8px 8px 0 !important;
-        color: white !important;
-        border: none !important;
-        box-shadow: 2px 0 12px rgba(0,180,255,0.3) !important;
+    [data-testid="stSidebar"] > div {{
+        display:block !important;
+        visibility:visible !important;
+        opacity:1 !important;
+        overflow-y:auto !important;
+        padding-top:1rem !important;
     }}
-    [data-testid="collapsedControl"] button svg,
-    [data-testid="stSidebarCollapsedControl"] button svg {{
-        stroke: white !important;
-        fill: none !important;
+    [data-testid="stSidebarContent"] {{
+        display:block !important;
+        visibility:visible !important;
     }}
-    section[data-testid="stSidebar"] > div {{ overflow-y:auto !important; }}
-
-    .block-container {{ padding:1.5rem 2.5rem 3rem !important; max-width:1320px !important; }}
-
+    section[data-testid="stSidebar"] {{
+        display:flex !important;
+        min-width:18rem !important;
+        transform:translateX(0) !important;
+    }}
+    [data-testid="collapsedControl"] {{
+        display:none !important;
+    }}
+    [data-testid="stSidebarCollapsedControl"] {{
+        display:none !important;
+    }}
+    .block-container {{
+        padding:1.5rem 2.5rem 3rem !important;
+        max-width:1320px !important;
+        margin-left:0 !important;
+    }}
     /* ── navbar ── */
     .vv-nav {{
         display:flex; align-items:center; justify-content:space-between;
@@ -542,7 +540,7 @@ def _use_supabase():
 
 def _sb():
     """Return a supabase client, or raise if not available."""
-    from supabase import create_client
+    from supabase import create_client  # type: ignore
     url, key = _get_supabase_creds()
     return create_client(url, key)
 
@@ -582,7 +580,18 @@ def _init_sqlite():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""")
         conn.commit()
-
+        # ── Migration: add missing columns if upgrading old DB ──
+        existing_cols = [
+            row[1] for row in
+            conn.execute("PRAGMA table_info(users)").fetchall()
+        ]
+        if "approved" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN approved INTEGER NOT NULL DEFAULT 1")
+        if "created_at" not in existing_cols:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+            )
+        conn.commit()
 
 def _seed_accounts():
     """Seed demo/admin accounts — works for both Supabase and SQLite."""
@@ -950,10 +959,7 @@ def safe_csv(df):
         if isinstance(x, str) and x and x[0] in "=+-@":
             return "'" + x
         return x
-    try:
-        return df.map(esc).to_csv(index=False).encode("utf-8")
-    except AttributeError:
-        return df.applymap(esc).to_csv(index=False).encode("utf-8")
+    return df.map(esc).to_csv(index=False).encode("utf-8")
 
 
 def to_excel(df):
@@ -2379,6 +2385,503 @@ def tab_reports(df, features):
                     file_name=f"narrative_{i}.txt", mime="text/plain",
                     key=f"hist_dl_{i}",
                 )
+# ================================================================
+# TAB — CORRELATION LAYER
+# Drop-in addition to app_vitalview.py
+#
+# HOW TO ADD:
+# 1. Paste this entire function into app_vitalview.py
+#    (after tab_reports, before tab_ai_grant)
+# 2. In main(), add to tab_labels:
+#    "🔗  Correlations",
+# 3. In main(), add to tab_fns:
+#    lambda: tab_correlation(dfx, features),
+# ================================================================
+
+def tab_correlation(df, features):
+    import scipy.stats as _stats   # pip install scipy
+    T = THEME
+    disclaimer_banner()
+
+    section("Correlation Layer")
+    st.markdown(
+        f"<p style='color:{T['muted']};font-size:0.9rem;margin-bottom:1.5rem;'>"
+        "Discover which health indicators move together — and auto-generate "
+        "grant-ready narrative sentences from the relationships your data reveals.</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Data check ────────────────────────────────────────────
+    if not dashboard_ready(df):
+        empty_state(
+            "🔗", "No data loaded",
+            "Enable Demo Mode in the sidebar or upload a VitalView-schema file.",
+        )
+        return
+
+    # Build pivot: one row per county, one column per indicator
+    latest = int(df["year"].max()) if "year" in df.columns else None
+    df_l   = df[df["year"] == latest].copy() if latest else df.copy()
+    pivot  = derive_pivot(df_l)
+
+    if pivot is None or pivot.empty:
+        st.warning("Could not build indicator pivot. Check your data has the required schema.")
+        return
+
+    ind_cols = [c for c in pivot.columns if c not in ["state", "county", "fips"]]
+    if len(ind_cols) < 2:
+        st.warning("Need at least 2 indicators to compute correlations.")
+        return
+
+    # ── LAYER 1: Correlation Matrix ───────────────────────────
+    section("Layer 1 — Correlation Matrix")
+    st.markdown(
+        f"<p style='color:{T['muted']};font-size:0.82rem;margin-bottom:1rem;'>"
+        "How strongly does each indicator relate to every other? "
+        "Deep red = strong positive correlation. Blue = inverse relationship.</p>",
+        unsafe_allow_html=True,
+    )
+
+    corr_matrix = pivot[ind_cols].corr(method="pearson").round(2)
+
+    fig_matrix = px.imshow(
+        corr_matrix,
+        color_continuous_scale="RdBu_r",
+        zmin=-1, zmax=1,
+        text_auto=True,
+        aspect="auto",
+        labels={"color": "Pearson r"},
+    )
+    fig_matrix.update_traces(
+        textfont_size=11,
+        hovertemplate="<b>%{x}</b> vs <b>%{y}</b><br>r = %{z}<extra></extra>",
+    )
+    fig_matrix.update_layout(
+        paper_bgcolor=T["bg"],
+        plot_bgcolor=T["card"],
+        font_color=T["text"],
+        margin={"t": 20, "b": 20, "l": 10, "r": 10},
+        height=420,
+        coloraxis_colorbar=dict(
+            bgcolor=T["card"],
+            bordercolor=T["border"],
+            tickfont=dict(color=T["text"]),
+            title=dict(font=dict(color=T["text"])),
+        ),
+        xaxis=dict(tickfont=dict(size=10, color=T["text"])),
+        yaxis=dict(tickfont=dict(size=10, color=T["text"])),
+    )
+    st.plotly_chart(fig_matrix, use_container_width=True)
+
+    # Surface top correlations as cards
+    pairs = []
+    for i in range(len(ind_cols)):
+        for j in range(i + 1, len(ind_cols)):
+            r = corr_matrix.loc[ind_cols[i], ind_cols[j]]
+            pairs.append((abs(r), r, ind_cols[i], ind_cols[j]))
+    pairs.sort(reverse=True)
+
+    if pairs:
+        st.markdown(
+            f"<div style='font-size:0.72rem;font-weight:700;color:{T['primary']};"
+            f"text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.5rem;'>"
+            f"Strongest Relationships</div>",
+            unsafe_allow_html=True,
+        )
+        top_pairs = pairs[:3]
+        pcols = st.columns(len(top_pairs))
+        for i, (abs_r, r, ind_a, ind_b) in enumerate(top_pairs):
+            direction = "↑ Positive" if r > 0 else "↓ Inverse"
+            strength  = "Very Strong" if abs_r >= 0.8 else ("Strong" if abs_r >= 0.6 else "Moderate")
+            color     = T["danger"] if r > 0 else T["primary"]
+            with pcols[i]:
+                st.markdown(f"""
+                <div class="vv-metric" style="border-left:3px solid {color};">
+                    <div class="vv-metric-label">{strength} · {direction}</div>
+                    <div style="font-size:1.5rem;font-weight:700;
+                                font-family:'JetBrains Mono',monospace;
+                                color:{color};margin:0.3rem 0;">r = {r:.2f}</div>
+                    <div style="font-size:0.72rem;color:{T['text']};line-height:1.5;">
+                        {ind_a.split('(')[0].strip()}<br>
+                        <span style="color:{T['muted']};">↕</span><br>
+                        {ind_b.split('(')[0].strip()}
+                    </div>
+                </div>""", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:2rem'></div>", unsafe_allow_html=True)
+
+    # ── LAYER 2: Scatter Plot Builder ─────────────────────────
+    section("Layer 2 — Scatter Plot Builder")
+    st.markdown(
+        f"<p style='color:{T['muted']};font-size:0.82rem;margin-bottom:1rem;'>"
+        "Pick two indicators. VitalView plots each county, fits a trend line, "
+        "and drafts a grant-ready narrative sentence from the relationship.</p>",
+        unsafe_allow_html=True,
+    )
+
+    sc1, sc2 = st.columns(2)
+    with sc1:
+        x_ind = st.selectbox("X axis (independent / driver)", ind_cols, index=0, key="corr_x")
+    with sc2:
+        y_default = 1 if len(ind_cols) > 1 else 0
+        y_ind = st.selectbox("Y axis (outcome / burden)", ind_cols, index=y_default, key="corr_y")
+
+    if x_ind == y_ind:
+        st.warning("Please select two different indicators.")
+    else:
+        scatter_df = pivot[["county", "state", x_ind, y_ind]].dropna()
+
+        if len(scatter_df) < 3:
+            st.warning("Not enough data points. Need at least 3 counties with both indicators.")
+        else:
+            # Compute pearson r and p-value
+            r_val, p_val = _stats.pearsonr(scatter_df[x_ind], scatter_df[y_ind])
+
+            # Risk tiers for color coding
+            scatter_df["x_risk"] = assign_risk_tier(scatter_df[x_ind])
+            scatter_df["y_risk"] = assign_risk_tier(scatter_df[y_ind])
+
+            # Trend line via polyfit
+            x_arr = scatter_df[x_ind].values
+            y_arr = scatter_df[y_ind].values
+            m, b  = np.polyfit(x_arr, y_arr, 1)
+            x_line = np.linspace(x_arr.min(), x_arr.max(), 50)
+            y_line = m * x_line + b
+            trend_df = pd.DataFrame({"x": x_line, "y": y_line})
+
+            # Scatter chart
+            color_map = {
+                "Critical": T["danger"],
+                "High":     T["warn"],
+                "Moderate": T["primary"],
+                "Low":      T["good"],
+                "Unknown":  T["muted"],
+            }
+            scatter_chart = (
+                alt.Chart(scatter_df)
+                .mark_circle(size=110, opacity=0.85)
+                .encode(
+                    x=alt.X(f"{x_ind}:Q", title=x_ind),
+                    y=alt.Y(f"{y_ind}:Q", title=y_ind),
+                    color=alt.Color(
+                        "x_risk:N",
+                        scale=alt.Scale(
+                            domain=list(color_map.keys()),
+                            range=list(color_map.values()),
+                        ),
+                        legend=alt.Legend(title="X Risk Tier"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("county:N",       title="County"),
+                        alt.Tooltip("state:N",        title="State"),
+                        alt.Tooltip(f"{x_ind}:Q",     title=x_ind,  format=".2f"),
+                        alt.Tooltip(f"{y_ind}:Q",     title=y_ind,  format=".2f"),
+                        alt.Tooltip("x_risk:N",       title="Risk Tier"),
+                    ],
+                )
+            )
+            trend_chart = (
+                alt.Chart(trend_df)
+                .mark_line(color=T["accent"], strokeDash=[4, 2], strokeWidth=2)
+                .encode(x="x:Q", y="y:Q")
+            )
+            combined = (scatter_chart + trend_chart).properties(height=380)
+            st.altair_chart(combined, use_container_width=True)
+
+            # r / p-value stats bar
+            sig_label = (
+                "Statistically significant (p < 0.05)" if p_val < 0.05
+                else "Not statistically significant (p ≥ 0.05)"
+            )
+            sig_color = T["good"] if p_val < 0.05 else T["warn"]
+            strength_label = (
+                "Very Strong" if abs(r_val) >= 0.8 else
+                "Strong"      if abs(r_val) >= 0.6 else
+                "Moderate"    if abs(r_val) >= 0.4 else
+                "Weak"
+            )
+            direction_label = "positive" if r_val > 0 else "inverse"
+
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                metric_card("Pearson r", f"{r_val:.3f}",
+                            sub=f"{strength_label} {direction_label} correlation")
+            with m2:
+                metric_card("p-value", f"{p_val:.4f}", sub=sig_label,
+                            sub_class="good" if p_val < 0.05 else "warn")
+            with m3:
+                metric_card("R²", f"{r_val**2:.3f}",
+                            sub=f"{r_val**2*100:.1f}% of variance explained")
+
+            st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+
+            # ── Auto-generated grant sentence ─────────────────
+            x_short   = x_ind.split("(")[0].strip()
+            y_short   = y_ind.split("(")[0].strip()
+            x_median  = round(float(scatter_df[x_ind].median()), 1)
+            y_median  = round(float(scatter_df[y_ind].median()), 1)
+            n_counties = len(scatter_df)
+            region    = (
+                ", ".join(sorted(scatter_df["state"].unique().tolist()))
+                if "state" in scatter_df.columns else "the study region"
+            )
+
+            # Find the highest-need county
+            top_county_row = scatter_df.loc[scatter_df[x_ind].idxmax()]
+            top_county     = top_county_row["county"]
+            top_x_val      = round(float(top_county_row[x_ind]), 1)
+            top_y_val      = round(float(top_county_row[y_ind]), 1)
+
+            if abs(r_val) >= 0.4 and p_val < 0.05:
+                # Strong enough for a causal-adjacent narrative
+                direction_word = "increases" if r_val > 0 else "decreases"
+                grant_sentence = (
+                    f"Across {n_counties} counties in {region}, {x_short} correlates "
+                    f"{strength_label.lower()} with {y_short} (r = {r_val:.2f}, p = {p_val:.4f}), "
+                    f"suggesting that communities with higher {x_short} experience "
+                    f"correspondingly {'higher' if r_val > 0 else 'lower'} {y_short}. "
+                    f"In {top_county}, where {x_short} reaches {top_x_val}% — "
+                    f"among the highest in the region — "
+                    f"{y_short} stands at {top_y_val}%, underscoring the compounding "
+                    f"burden faced by residents in this community. "
+                    f"Addressing {x_short} through targeted intervention represents "
+                    f"a high-leverage opportunity to reduce {y_short} disparities "
+                    f"across the region."
+                )
+            elif abs(r_val) >= 0.2:
+                # Moderate — softer language
+                grant_sentence = (
+                    f"Analysis of {n_counties} counties in {region} reveals a "
+                    f"{strength_label.lower()} relationship between {x_short} and "
+                    f"{y_short} (r = {r_val:.2f}), with regional medians of "
+                    f"{x_median}% and {y_median}% respectively. "
+                    f"While additional factors contribute to this pattern, "
+                    f"the data supports prioritizing communities where {x_short} "
+                    f"is elevated as part of a comprehensive health equity strategy."
+                )
+            else:
+                # Weak — honest framing
+                grant_sentence = (
+                    f"In {region}, {x_short} and {y_short} show a limited direct "
+                    f"correlation (r = {r_val:.2f}) across {n_counties} counties, "
+                    f"suggesting these indicators are driven by distinct upstream factors. "
+                    f"A multi-determinant approach — addressing both {x_short} "
+                    f"(regional median: {x_median}%) and {y_short} "
+                    f"(regional median: {y_median}%) through coordinated programming — "
+                    f"is recommended."
+                )
+
+            st.markdown(f"""
+            <div style="background:{T['card']};border:1px solid {T['accent']}44;
+                        border-left:4px solid {T['accent']};border-radius:10px;
+                        padding:1.25rem 1.5rem;margin-top:1rem;">
+                <div style="font-size:0.65rem;font-weight:700;color:{T['accent']};
+                            text-transform:uppercase;letter-spacing:0.1em;
+                            margin-bottom:0.6rem;">
+                    ✍️ Grant-Ready Narrative Sentence
+                </div>
+                <div style="font-size:0.9rem;color:{T['text']};line-height:1.7;
+                            font-style:italic;">
+                    "{grant_sentence}"
+                </div>
+                <div style="margin-top:0.75rem;font-size:0.72rem;color:{T['muted']};">
+                    Copy this directly into your Statement of Need or Executive Summary.
+                    Data sourced from VitalView county-level analysis ({latest}).
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+            # Copy button workaround — show in text area for easy copy
+            with st.expander("📋 Copy narrative text"):
+                st.text_area(
+                    "Select all and copy:",
+                    value=grant_sentence,
+                    height=120,
+                    key="corr_copy_area",
+                    label_visibility="collapsed",
+                )
+
+    st.markdown("<div style='height:2rem'></div>", unsafe_allow_html=True)
+
+    # ── LAYER 3: Multi-Variable Overlap ───────────────────────
+    section("Layer 3 — High-Burden Overlap (The 'Undeniable Need' View)")
+    st.markdown(
+        f"<p style='color:{T['muted']};font-size:0.82rem;margin-bottom:1rem;'>"
+        "Select 2–4 indicators. VitalView surfaces counties where <b>every selected "
+        "indicator</b> is in the High or Critical tier simultaneously — the hardest "
+        "cases to argue against in a grant narrative.</p>",
+        unsafe_allow_html=True,
+    )
+
+    overlap_inds = st.multiselect(
+        "Select indicators for overlap analysis",
+        ind_cols,
+        default=ind_cols[:min(3, len(ind_cols))],
+        key="corr_overlap_inds",
+        help="Pick 2–4 indicators. Counties where ALL are High/Critical will be highlighted.",
+    )
+
+    if len(overlap_inds) < 2:
+        st.info("Select at least 2 indicators.")
+    else:
+        overlap_df = pivot[["county", "state"] + overlap_inds].dropna().copy()
+
+        # Assign risk tiers for each selected indicator
+        for ind in overlap_inds:
+            overlap_df[f"_risk_{ind}"] = assign_risk_tier(overlap_df[ind])
+
+        # Find counties where ALL indicators are High or Critical
+        def _is_high_or_critical(row):
+            return all(
+                row[f"_risk_{ind}"] in ("High", "Critical")
+                for ind in overlap_inds
+            )
+
+        overlap_df["all_elevated"] = overlap_df.apply(_is_high_or_critical, axis=1)
+        elevated = overlap_df[overlap_df["all_elevated"]].copy()
+        other    = overlap_df[~overlap_df["all_elevated"]].copy()
+
+        # Summary callout
+        n_elevated = len(elevated)
+        n_total    = len(overlap_df)
+        pct        = round(n_elevated / n_total * 100, 1) if n_total else 0
+
+        color_elevated = T["danger"] if n_elevated > 0 else T["good"]
+        st.markdown(f"""
+        <div style="background:{T['card']};border:2px solid {color_elevated}55;
+                    border-radius:12px;padding:1.25rem 1.5rem;margin-bottom:1.25rem;
+                    display:flex;align-items:center;gap:1.5rem;">
+            <div style="text-align:center;min-width:80px;">
+                <div style="font-family:'JetBrains Mono',monospace;font-size:2.2rem;
+                            font-weight:700;color:{color_elevated};">{n_elevated}</div>
+                <div style="font-size:0.65rem;font-weight:700;color:{T['muted']};
+                            text-transform:uppercase;letter-spacing:0.08em;">
+                    Counties
+                </div>
+            </div>
+            <div>
+                <div style="font-size:0.95rem;font-weight:700;color:{T['text']};
+                            margin-bottom:0.3rem;">
+                    {"High-burden overlap identified" if n_elevated > 0 else "No full overlap found"}
+                </div>
+                <div style="font-size:0.82rem;color:{T['muted']};line-height:1.5;">
+                    {pct}% of counties ({n_elevated} of {n_total}) show
+                    High or Critical burden across all {len(overlap_inds)} selected indicators.
+                    {"These are your strongest grant targets." if n_elevated > 0
+                     else "Try selecting fewer indicators or check your data coverage."}
+                </div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        # Build chart: grouped bar — elevated counties vs others
+        # Melt for comparison
+        chart_data_rows = []
+        for _, row in overlap_df.iterrows():
+            label = "🔴 All High/Critical" if row["all_elevated"] else "⚪ Partial / Lower"
+            for ind in overlap_inds:
+                chart_data_rows.append({
+                    "county":    row["county"],
+                    "indicator": ind.split("(")[0].strip(),
+                    "value":     row[ind],
+                    "group":     label,
+                })
+        chart_data = pd.DataFrame(chart_data_rows)
+
+        overlap_chart = (
+            alt.Chart(chart_data)
+            .mark_bar(cornerRadiusTopRight=3, cornerRadiusTopLeft=3, opacity=0.85)
+            .encode(
+                x=alt.X("county:N", title="County",
+                         sort=alt.SortField("value", order="descending")),
+                y=alt.Y("value:Q", title="Indicator Value"),
+                color=alt.Color(
+                    "group:N",
+                    scale=alt.Scale(
+                        domain=["🔴 All High/Critical", "⚪ Partial / Lower"],
+                        range=[T["danger"], T["muted"]],
+                    ),
+                    legend=alt.Legend(title="Overlap Status"),
+                ),
+                column=alt.Column("indicator:N", title=None,
+                                  header=alt.Header(
+                                      labelColor=T["text"],
+                                      labelFontSize=11,
+                                  )),
+                tooltip=[
+                    alt.Tooltip("county:N"),
+                    alt.Tooltip("indicator:N"),
+                    alt.Tooltip("value:Q", format=".2f"),
+                    alt.Tooltip("group:N", title="Status"),
+                ],
+            )
+            .properties(width=max(120, 600 // len(overlap_inds)), height=280)
+            .resolve_scale(y="independent")
+        )
+        st.altair_chart(overlap_chart, use_container_width=True)
+
+        # Elevated counties table
+        if n_elevated > 0:
+            section("High-Burden Counties — Priority Targets")
+            disp_cols  = ["county", "state"] + overlap_inds
+            disp_cols  = [c for c in disp_cols if c in elevated.columns]
+            show_table = elevated[disp_cols].sort_values(overlap_inds[0], ascending=False)
+            show_table = show_table.round(2)
+            def _style_elevated(row):
+                return [f"background:#3d1a1a;color:#ef4444;font-weight:700"
+                        if col in overlap_inds else
+                        f"background:#1c2333;color:#f0f4ff"
+                        for col in row.index]
+
+            st.dataframe(
+                show_table.style.apply(_style_elevated, axis=1).hide(axis="index"),
+                use_container_width=True,
+                height=min(400, 60 + n_elevated * 42),
+            )
+
+            # Grant sentence for overlap
+            county_list = ", ".join(elevated["county"].tolist())
+            ind_list    = " and ".join([i.split("(")[0].strip() for i in overlap_inds])
+            overlap_sentence = (
+                f"Of {n_total} counties analyzed in {region}, "
+                f"{n_elevated} ({pct}%) — {county_list} — "
+                f"demonstrate simultaneously elevated burden across all key indicators: "
+                f"{ind_list}. "
+                f"This co-occurrence of risk factors compounds health vulnerability "
+                f"for residents in these communities and represents the highest-priority "
+                f"targets for investment under this proposal."
+            )
+
+            st.markdown(f"""
+            <div style="background:{T['card']};border:1px solid {T['danger']}44;
+                        border-left:4px solid {T['danger']};border-radius:10px;
+                        padding:1.25rem 1.5rem;margin-top:1rem;">
+                <div style="font-size:0.65rem;font-weight:700;color:{T['danger']};
+                            text-transform:uppercase;letter-spacing:0.1em;
+                            margin-bottom:0.6rem;">
+                    ✍️ Grant-Ready Statement of Need — Overlap Narrative
+                </div>
+                <div style="font-size:0.9rem;color:{T['text']};line-height:1.7;
+                            font-style:italic;">
+                    "{overlap_sentence}"
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+            with st.expander("📋 Copy overlap narrative"):
+                st.text_area(
+                    "Select all and copy:",
+                    value=overlap_sentence,
+                    height=120,
+                    key="overlap_copy_area",
+                    label_visibility="collapsed",
+                )
+
+            # Export
+            section("Export")
+            st.download_button(
+                "⬇ Download Priority Counties (CSV)",
+                data=safe_csv(show_table),
+                file_name="vitalview_high_burden_overlap.csv",
+                mime="text/csv",
+            )
 
 # ================================================================
 # AUTH PAGE
@@ -2585,7 +3088,6 @@ def show_auth_page():
 
 
 
-
 # ================================================================
 # TAB — AI GRANT WRITER (Pro / Enterprise only)
 # ================================================================
@@ -2655,29 +3157,10 @@ def tab_ai_grant(df, features):
         prog_name  = st.text_input("Program / Initiative Name",
                                    value="Community Health Equity Initiative",
                                    key="ai_prog")
-        # ── Custom funder dropdown ────────────────────────────
-        DEFAULT_FUNDERS = [
-            "HRSA","SAMHSA","CDC","Robert Wood Johnson Foundation",
-            "Kellogg Foundation","Health Foundation of South Florida",
-            "United Way","Local Government","Other"
-        ]
-        if "custom_funders" not in st.session_state:
-            st.session_state["custom_funders"] = []
-        all_funders = DEFAULT_FUNDERS + st.session_state["custom_funders"]
-
-        funder = st.selectbox("Target Funder Type", all_funders, key="ai_funder")
-
-        # Add custom funder
-        new_funder = st.text_input("➕ Add custom funder", placeholder="e.g. Peacock Foundation",
-                                   key="ai_new_funder")
-        if st.button("Add Funder", key="ai_add_funder"):
-            nf = new_funder.strip()
-            if nf and nf not in all_funders:
-                st.session_state["custom_funders"].append(nf)
-                st.success(f"✅ '{nf}' added to funder list!")
-                st.rerun()
-            elif nf in all_funders:
-                st.warning("That funder is already in the list.")
+        funder     = st.selectbox("Target Funder Type",
+                                  ["HRSA","SAMHSA","CDC","Robert Wood Johnson Foundation",
+                                   "Kellogg Foundation","Local Government","Other"],
+                                  key="ai_funder")
         grant_type = st.selectbox("Grant Type",
                                   ["Community Health Needs Assessment","Substance Use",
                                    "Mental Health","Food Access","Housing & Health",
@@ -2888,7 +3371,9 @@ def tab_admin(user):
         else:
             with get_conn() as conn:
                 users_raw = [dict(r) for r in conn.execute(
-                    "SELECT id, name, email, plan, approved, created_at FROM users ORDER BY created_at DESC"
+                    "SELECT id, name, email, plan, COALESCE(approved, 1) as approved, "
+                    "COALESCE(created_at, datetime('now')) as created_at "
+                    "FROM users ORDER BY rowid DESC"
                 ).fetchall()]
                 audit_raw = [dict(r) for r in conn.execute(
                     "SELECT email, action, detail, created_at FROM audit_log ORDER BY created_at DESC LIMIT 100"
@@ -3045,647 +3530,11 @@ def tab_admin(user):
 
 
 # ================================================================
-# TAB — GRANT FORM FILLER (Pro / Enterprise only)
-# ================================================================
-def tab_grant_form(df, features):
-    T = THEME
-
-    # ── Gate: Pro/Enterprise only ─────────────────────────────
-    if not features.get("ai_writer", False):
-        st.markdown(f"""
-        <div style="max-width:580px;margin:3rem auto;text-align:center;
-                    background:{T["card"]};border:2px solid {T["primary"]}44;
-                    border-radius:16px;padding:2.5rem;">
-            <div style="font-size:2.5rem;margin-bottom:1rem;">🔒</div>
-            <div style="font-family:Syne,sans-serif;font-size:1.2rem;
-                        font-weight:800;color:{T["text"]};margin-bottom:0.75rem;">
-                Grant Form Filler is a Pro Feature
-            </div>
-            <div style="color:{T["muted"]};font-size:0.85rem;line-height:1.7;
-                        margin-bottom:1.5rem;">
-                Upgrade to <b style="color:{T["primary"]};">Pro</b> or
-                <b style="color:{T["accent"]};">Enterprise</b> to upload any grant
-                application and have VitalView auto-fill every section using your
-                real health data.
-            </div>
-            <div style="background:{T["primary"]}18;border:1px solid {T["primary"]}44;
-                        border-radius:8px;padding:0.75rem;font-size:0.8rem;
-                        color:{T["primary"]};">
-                ⚡ Contact <b>support@vitalview.health</b> to upgrade your plan
-            </div>
-        </div>""", unsafe_allow_html=True)
-        return
-
-    disclaimer_banner()
-    section("📋 Grant Application Form Filler")
-
-    st.markdown(f"""
-    <div style="background:{T["card"]};border:1px solid {T["border"]};
-                border-radius:12px;padding:1.25rem 1.5rem;margin-bottom:1.5rem;">
-        <div style="font-size:0.72rem;font-weight:700;color:{T["primary"]};
-                    text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.5rem;">
-            How it works
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0.75rem;">
-            {"".join([
-                f"<div style='text-align:center;padding:0.75rem;background:{T['bg']};border-radius:8px;border:1px solid {T['border']};'>"
-                f"<div style='font-size:1.4rem;margin-bottom:0.4rem;'>{icon}</div>"
-                f"<div style='font-size:0.75rem;font-weight:700;color:{T['text']};'>{step}</div>"
-                f"<div style='font-size:0.7rem;color:{T['muted']};margin-top:0.2rem;'>{desc}</div>"
-                f"</div>"
-                for icon, step, desc in [
-                    ("📤", "1. Upload Form", "PDF or Word grant application"),
-                    ("🔍", "2. VV Reads It", "Extracts all questions & limits"),
-                    ("🤖", "3. AI Fills It", "Uses your health data to answer"),
-                    ("⬇️", "4. Download", "Export completed Word document"),
-                ]
-            ])}
-        </div>
-    </div>""", unsafe_allow_html=True)
-
-    # ── Step 1: Upload grant form ─────────────────────────────
-    section("Step 1 — Upload Your Grant Application")
-    st.caption("Supports PDF and Word (.docx) grant application forms. Your form is never stored — it stays in your session only.")
-
-    grant_form_file = st.file_uploader(
-        "Upload grant application form",
-        type=["pdf", "docx"],
-        key="grant_form_upload",
-        help="Upload the grant application you want to fill out"
-    )
-
-    # ── Step 2: Configure ─────────────────────────────────────
-    section("Step 2 — Configure Your Response")
-    c1, c2 = st.columns(2)
-    with c1:
-        org_name    = st.text_input("Organization Name",
-                                    value="Florida Health Justice Project",
-                                    key="gf_org")
-        prog_name   = st.text_input("Program / Initiative Name",
-                                    value="Community Health Equity Initiative",
-                                    key="gf_prog")
-        target_pop  = st.text_input("Target Population",
-                                    value="Low-income uninsured Floridians",
-                                    key="gf_pop")
-    with c2:
-        budget      = st.selectbox("Budget Range",
-                                   ["Under $50K","$50K–$150K","$150K–$500K",
-                                    "$500K–$1M","Over $1M"],
-                                   key="gf_budget")
-        timeframe   = st.text_input("Project Timeframe",
-                                    value="12 months",
-                                    key="gf_timeframe")
-        tone        = st.selectbox("Writing Tone",
-                                   ["Equity-forward & urgent",
-                                    "Data-driven & professional",
-                                    "Community-centered & warm",
-                                    "Impact-focused & concise"],
-                                   key="gf_tone")
-
-    # ── Step 3: Extract and generate ─────────────────────────
-    if not dashboard_ready(df):
-        st.warning("⚠️ Upload health data via the sidebar first so VitalView can ground your responses in real numbers.")
-
-    if not grant_form_file:
-        st.info("📂 Upload a grant application form above to continue.")
-        return
-
-    # Store original file bytes for PDF overlay export
-    grant_form_file.seek(0)
-    st.session_state["gf_orig_bytes"] = grant_form_file.read()
-    grant_form_file.seek(0)
-
-    # Extract text from uploaded form
-    def extract_form_text(file):
-        """Extract text from PDF or DOCX grant form."""
-        import io
-        suffix = file.name.lower()
-        text = ""
-        try:
-            if suffix.endswith(".docx"):
-                try:
-                    import zipfile
-                    import xml.etree.ElementTree as ET
-                    file.seek(0)
-                    with zipfile.ZipFile(io.BytesIO(file.read())) as z:
-                        with z.open("word/document.xml") as doc:
-                            tree = ET.parse(doc)
-                            root = tree.getroot()
-                            ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-                            paragraphs = root.findall(".//w:p", ns)
-                            for para in paragraphs:
-                                texts = para.findall(".//w:t", ns)
-                                line  = "".join(t.text or "" for t in texts)
-                                if line.strip():
-                                    text += line.strip() + "\n"
-                except Exception:
-                    text = "Could not extract DOCX content."
-            elif suffix.endswith(".pdf"):
-                try:
-                    from reportlab.lib.pagesizes import letter
-                    file.seek(0)
-                    raw = file.read()
-                    # Basic PDF text extraction
-                    import re as _re
-                    chunks = _re.findall(rb'BT.*?ET', raw, _re.DOTALL)
-                    for chunk in chunks[:50]:
-                        strings = _re.findall(rb'\(([^)]{2,200})\)', chunk)
-                        for s in strings:
-                            try:
-                                decoded = s.decode("latin-1").strip()
-                                if len(decoded) > 3:
-                                    text += decoded + "\n"
-                            except Exception:
-                                pass
-                    if not text.strip():
-                        text = "PDF text extraction limited. VitalView will generate comprehensive responses based on standard grant sections."
-                except Exception:
-                    text = "PDF text extraction limited. VitalView will generate comprehensive responses based on standard grant sections."
-        except Exception as e:
-            text = f"Could not read file: {e}"
-        return text.strip()
-
-    # Build data context
-    def build_data_context(dfx):
-        lines = []
-        if dfx is None or dfx.empty:
-            return "No health data uploaded."
-        if "state" in dfx.columns:
-            states = dfx["state"].dropna().unique().tolist()
-            lines.append(f"States/Regions: {', '.join(states)}")
-        if "county" in dfx.columns:
-            counties = dfx["county"].dropna().unique().tolist()
-            lines.append(f"Counties ({len(counties)}): {', '.join(counties[:10])}" +
-                        (" ..." if len(counties) > 10 else ""))
-        if "indicator" in dfx.columns and "value" in dfx.columns:
-            latest_yr = int(dfx["year"].max()) if "year" in dfx.columns and not dfx["year"].isna().all() else None
-            df_l = dfx[dfx["year"]==latest_yr] if latest_yr else dfx
-            for ind in df_l["indicator"].dropna().unique():
-                vals = df_l[df_l["indicator"]==ind]["value"].dropna()
-                if len(vals):
-                    lines.append(f"  • {ind}: mean={vals.mean():.1f}, min={vals.min():.1f}, max={vals.max():.1f}")
-        return "\n".join(lines)
-
-    # Standard grant sections to always address
-    STANDARD_SECTIONS = [
-        {
-            "key": "needs_statement",
-            "title": "Statement of Need / Problem Statement",
-            "instruction": "Write a compelling, data-grounded needs statement. Use specific statistics from the health data. Explain why this community needs funding NOW. Reference disparities, gaps, and inequities. Be urgent and specific."
-        },
-        {
-            "key": "target_population",
-            "title": "Target Population & Geographic Area",
-            "instruction": "Describe the target population in detail. Include demographics, geography, health status, barriers to care. Use the county and indicator data to be specific about who is being served and where."
-        },
-        {
-            "key": "smart_objectives",
-            "title": "Goals & SMART Objectives",
-            "instruction": "Write 3-4 SMART objectives (Specific, Measurable, Achievable, Relevant, Time-bound). Each objective must include a baseline number from the data, a target improvement, and a timeframe. Format as numbered list."
-        },
-        {
-            "key": "program_description",
-            "title": "Program Description & Activities",
-            "instruction": "Describe the program activities in detail. What will the organization DO with this funding? Include specific interventions, timelines, staff roles, and how activities connect to the stated need."
-        },
-        {
-            "key": "evaluation_plan",
-            "title": "Evaluation Plan",
-            "instruction": "Write a rigorous evaluation plan. Include process metrics, outcome metrics tied to the SMART objectives, data collection methods, and how success will be measured. Reference the health indicators from the data."
-        },
-        {
-            "key": "financial_forecast",
-            "title": "Budget Narrative & Financial Forecast",
-            "instruction": "Write a budget narrative that justifies the funding request. Break down how funds will be used (personnel, supplies, outreach, evaluation). Connect every budget line to a program activity. Be specific and defensible."
-        },
-        {
-            "key": "org_capacity",
-            "title": "Organizational Capacity",
-            "instruction": "Describe the organization's capacity to implement this program. Include staff qualifications, past experience with similar grants, partnerships, infrastructure, and why this organization is uniquely positioned to do this work."
-        },
-        {
-            "key": "sustainability",
-            "title": "Sustainability Plan",
-            "instruction": "Explain how the program will continue after the grant period ends. Include diverse funding strategies, earned revenue potential, partnerships, and long-term community impact."
-        },
-    ]
-
-    # Generate button
-    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
-
-    if "gf_results" not in st.session_state:
-        st.session_state["gf_results"] = {}
-
-    generate = st.button("📋 Extract & Fill Application", type="primary",
-                         key="gf_generate", use_container_width=False)
-
-    if generate:
-        dfx = st.session_state.get("dfx", df)
-        data_ctx  = build_data_context(dfx)
-        form_text = extract_form_text(grant_form_file)
-
-        prompt = f"""You are an expert grant writer filling out a grant application form on behalf of a community health organization.
-
-ORGANIZATION: {org_name}
-PROGRAM: {prog_name}
-TARGET POPULATION: {target_pop}
-BUDGET RANGE: {budget}
-TIMEFRAME: {timeframe}
-WRITING TONE: {tone}
-
-REAL HEALTH DATA FROM VITALVIEW:
-{data_ctx}
-
-GRANT APPLICATION CONTENT DETECTED:
-{form_text[:3000] if form_text else "Standard grant application format"}
-
-INSTRUCTIONS:
-You must fill out each of the following grant application sections. For every section:
-1. Use the REAL health data statistics provided above — cite specific numbers
-2. Stay within grant writing best practices for that section type
-3. Write in a {tone} voice
-4. Be specific, compelling, and funder-ready
-5. Ground every claim in the data
-
-Write each section clearly labeled. Be thorough but concise.
-
-SECTIONS TO COMPLETE:
-1. Statement of Need — compelling, data-driven, urgent
-2. Target Population & Geographic Area — specific demographics and geography
-3. Goals & SMART Objectives — 3-4 measurable objectives with baselines and targets
-4. Program Description & Activities — what will be done, by whom, when
-5. Evaluation Plan — how success will be measured, tied to objectives
-6. Budget Narrative — justify the {budget} request line by line
-7. Organizational Capacity — why this org can deliver
-8. Sustainability Plan — how this continues after funding ends
-
-Format each section with ## [SECTION NAME] followed by the content."""
-
-        with st.spinner("📋 Reading your grant form and generating responses..."):
-            try:
-                import requests as _req
-                try:
-                    api_key = st.secrets.get("ANTHROPIC_API_KEY",
-                                os.getenv("ANTHROPIC_API_KEY", ""))
-                except Exception:
-                    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-
-                resp = _req.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": "claude-haiku-4-5-20251001",
-                        "max_tokens": 3000,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                    timeout=120,
-                )
-                if resp.status_code == 200:
-                    raw = resp.json()["content"][0]["text"]
-                    # Parse sections
-                    import re as _re
-
-                    def _clean_md(t):
-                        """Strip markdown so PDF renders cleanly."""
-                        # Remove markdown tables — convert to plain bullet list
-                        def _table_to_bullets(m):
-                            lines = m.group(0).strip().split("\n")
-                            out   = []
-                            for ln in lines:
-                                cells = [c.strip() for c in ln.split("|") if c.strip()]
-                                if cells and not all(set(c) <= set("-: ") for c in cells):
-                                    out.append("  ".join(cells))
-                            return "\n".join(out)
-                        t = _re.sub(r"(\|.+\|\n?)+", _table_to_bullets, t)
-                        # Strip other markdown
-                        t = _re.sub(r"\*\*(.+?)\*\*", r"\1", t)
-                        t = _re.sub(r"\*(.+?)\*",       r"\1", t)
-                        t = _re.sub(r"^#{1,6}\s+",       "",     t, flags=_re.MULTILINE)
-                        t = _re.sub(r"^-{2,}\s*$",       "",     t, flags=_re.MULTILINE)
-                        t = _re.sub(r"^-\s+",            "• ",   t, flags=_re.MULTILINE)
-                        t = _re.sub(r"^#+\s*",           "",     t, flags=_re.MULTILINE)
-                        t = _re.sub(r"`(.+?)`",           r"\1", t)
-                        t = _re.sub(r"\[(.+?)\]\(.+?\)", r"\1", t)
-                        # Clean up excessive blank lines
-                        t = _re.sub(r"\n{3,}", "\n\n", t)
-                        return t.strip()
-
-                    parts = _re.split(r"(?m)^##\s+", raw)
-                    results = {}
-                    for part in parts:
-                        if not part.strip():
-                            continue
-                        lines   = part.strip().split("\n", 1)
-                        heading = _clean_md(lines[0].strip())
-                        body    = _clean_md(lines[1].strip()) if len(lines) > 1 else ""
-                        if heading:
-                            results[heading] = body
-                    st.session_state["gf_results"] = {
-                        "sections": results,
-                        "raw": raw,
-                        "org": org_name,
-                        "prog": prog_name,
-                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "form_name": grant_form_file.name,
-                    }
-                    st.success("✅ Grant application filled successfully!")
-                    st.rerun()
-                elif resp.status_code == 401:
-                    st.error("API key missing or invalid.")
-                else:
-                    st.error(f"Generation failed: {resp.status_code}")
-            except ImportError:
-                st.error("Install `requests`: pip install requests")
-            except Exception as e:
-                st.error(f"⚠️ Could not generate responses: {e}")
-
-    # ── Step 4: Review & Edit ─────────────────────────────────
-    saved = st.session_state.get("gf_results", {})
-    if saved.get("sections"):
-        section(f"Step 3 — Review & Edit — {saved.get('prog','')} ({saved.get('ts','')})")
-        st.caption(f"Form: {saved.get('form_name','')} · Click any section to expand and edit")
-
-        edited_sections = {}
-        for heading, body in saved["sections"].items():
-            with st.expander(f"📄 {heading}", expanded=False):
-                edited = st.text_area(
-                    "Edit response",
-                    value=body,
-                    height=250,
-                    key=f"gf_edit_{heading[:30]}",
-                    label_visibility="collapsed"
-                )
-                edited_sections[heading] = edited
-                wc = len(edited.split())
-                st.caption(f"Word count: {wc:,}")
-
-        # Update session with edits
-        if edited_sections:
-            saved["sections"] = edited_sections
-
-        # ── Step 5: Export ────────────────────────────────────
-        section("Step 4 — Export Completed Application")
-
-        def build_filled_pdf(saved_data, original_file_bytes=None):
-            """
-            Build a filled PDF:
-            - If original PDF bytes provided: overlay answers onto original pages
-            - Otherwise: build a clean standalone filled PDF
-            """
-            import io as _io
-            from reportlab.lib.pagesizes import letter
-            from reportlab.lib import colors
-            from reportlab.lib.units import inch
-            from reportlab.platypus import (
-                SimpleDocTemplate, Paragraph, Spacer, HRFlowable, PageBreak
-            )
-            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-
-            buf = _io.BytesIO()
-
-            # Try to overlay on original PDF first
-            if original_file_bytes:
-                try:
-                    from pypdf import PdfReader, PdfWriter
-                    from reportlab.pdfgen import canvas as rl_canvas
-
-                    original_reader = PdfReader(_io.BytesIO(original_file_bytes))
-                    writer = PdfWriter()
-
-                    # Build overlay PDF with all answers
-                    overlay_buf = _io.BytesIO()
-                    c = rl_canvas.Canvas(overlay_buf, pagesize=letter)
-                    page_w, page_h = letter
-
-                    sections = saved_data.get("sections", {})
-                    section_list = list(sections.items())
-
-                    import re as _rmd_ov
-                    def _strip_md(t):
-                        t = _rmd_ov.sub(r'\*\*(.+?)\*\*', r'\1', t)
-                        t = _rmd_ov.sub(r'\*(.+?)\*',       r'\1', t)
-                        t = _rmd_ov.sub(r'^#{1,6}\s+',       '',    t, flags=_rmd_ov.MULTILINE)
-                        t = _rmd_ov.sub(r'^-{2,}\s*$',       '',    t, flags=_rmd_ov.MULTILINE)
-                        t = _rmd_ov.sub(r'^-\s+',            '• ',  t, flags=_rmd_ov.MULTILINE)
-                        t = _rmd_ov.sub(r'^#+\s*',           '',    t, flags=_rmd_ov.MULTILINE)
-                        return t.strip()
-
-                    def _draw_wrapped(c, text, x, y, max_w, font, size, min_y, page_h):
-                        """Draw wrapped text, returning final y position."""
-                        c.setFont(font, size)
-                        words = text.split()
-                        line  = ""
-                        for word in words:
-                            test = (line + " " + word).strip()
-                            if c.stringWidth(test, font, size) <= max_w:
-                                line = test
-                            else:
-                                if y < min_y:
-                                    c.showPage()
-                                    y = page_h - 72
-                                    c.setFont(font, size)
-                                c.drawString(x, y, line)
-                                y -= size + 3
-                                line = word
-                        if line:
-                            if y < min_y:
-                                c.showPage()
-                                y = page_h - 72
-                                c.setFont(font, size)
-                            c.drawString(x, y, line)
-                            y -= size + 3
-                        return y
-
-                    # Build one continuous overlay with all sections
-                    # Starting after page 1 (cover page of original)
-                    y = page_h - 110  # start below original header
-                    margin_x = 76
-                    text_w   = page_w - 2 * margin_x
-                    min_y    = 72
-
-                    # Page 1: just org/program info overlay
-                    c.setFont("Helvetica-Bold", 9)
-                    c.setFillColor(colors.HexColor("#003087"))
-                    org  = saved_data.get("org", "")
-                    prog = saved_data.get("prog", "")
-                    ts   = saved_data.get("ts", "")
-                    c.drawString(margin_x, page_h - 90,
-                                 f"Applicant: {org}  |  Program: {prog}  |  VitalView {ts}")
-                    c.showPage()
-
-                    # Pages 2+: one section per original form page where possible
-                    num_orig   = len(original_reader.pages)
-                    items      = list(section_list)
-                    per_page   = max(1, len(items) // max(num_orig - 1, 1))
-
-                    for page_idx in range(1, num_orig):
-                        start        = (page_idx - 1) * per_page
-                        end          = min(start + per_page, len(items))
-                        page_secs    = items[start:end]
-                        y            = page_h - 110
-
-                        for heading, body in page_secs:
-                            clean_h = _strip_md(heading)
-                            clean_b = _strip_md(body)
-
-                            if y < min_y + 30:
-                                c.showPage()
-                                y = page_h - 72
-
-                            # Draw section label
-                            c.setFont("Helvetica-Bold", 8.5)
-                            c.setFillColor(colors.HexColor("#003087"))
-                            c.drawString(margin_x, y, clean_h[:90])
-                            y -= 13
-
-                            # Draw body
-                            c.setFillColor(colors.black)
-                            y = _draw_wrapped(c, clean_b, margin_x, y,
-                                              text_w, "Helvetica", 8, min_y, page_h)
-                            y -= 10  # section gap
-
-                        c.showPage()
-
-                    c.save()
-                    overlay_buf.seek(0)
-                    overlay_reader = PdfReader(overlay_buf)
-
-                    # Merge: overlay answers OVER original form pages
-                    num_overlay = len(overlay_reader.pages)
-                    for i, orig_page in enumerate(original_reader.pages):
-                        if i < num_overlay:
-                            # Scale overlay to match original page dimensions
-                            orig_page.merge_page(overlay_reader.pages[i])
-                        writer.add_page(orig_page)
-
-                    # If we generated more overlay pages than original, append them
-                    if num_overlay > len(original_reader.pages):
-                        for i in range(len(original_reader.pages), num_overlay):
-                            writer.add_page(overlay_reader.pages[i])
-
-                    output_buf = _io.BytesIO()
-                    writer.write(output_buf)
-                    output_buf.seek(0)
-                    return output_buf.getvalue()
-
-                except Exception:
-                    pass  # Fall through to standalone PDF
-
-            # Standalone filled PDF using ReportLab
-            styles = getSampleStyleSheet()
-            title_s = ParagraphStyle("gft", parent=styles["Title"],
-                                     fontSize=14, textColor=colors.HexColor("#003087"),
-                                     spaceAfter=6)
-            h1_s = ParagraphStyle("gfh1", parent=styles["Heading1"],
-                                  fontSize=11, textColor=colors.HexColor("#003087"),
-                                  spaceBefore=14, spaceAfter=4)
-            body_s = ParagraphStyle("gfb", parent=styles["Normal"],
-                                    fontSize=10, leading=14, spaceAfter=8)
-            meta_s = ParagraphStyle("gfm", parent=styles["Normal"],
-                                    fontSize=9, textColor=colors.HexColor("#666666"),
-                                    spaceAfter=4)
-
-            doc = SimpleDocTemplate(buf, pagesize=letter,
-                                    rightMargin=inch, leftMargin=inch,
-                                    topMargin=inch, bottomMargin=inch)
-            story = []
-
-            story.append(Paragraph(
-                f"{saved_data.get('org','')} — {saved_data.get('prog','')}",
-                title_s
-            ))
-            story.append(Paragraph(
-                f"Grant Application | Generated by VitalView | {saved_data.get('ts','')}",
-                meta_s
-            ))
-            story.append(HRFlowable(width="100%", thickness=2,
-                                    color=colors.HexColor("#003087")))
-            story.append(Spacer(1, 0.2*inch))
-
-            for heading, body in saved_data.get("sections", {}).items():
-                import re as _rmdh
-                clean_heading = _rmdh.sub(r'^#+\s*', '', heading).strip()
-                clean_heading = _rmdh.sub(r'\*\*(.+?)\*\*', r'\1', clean_heading)
-                story.append(Paragraph(clean_heading, h1_s))
-                story.append(HRFlowable(width="100%", thickness=0.5,
-                                        color=colors.HexColor("#cccccc")))
-                # Safely escape body text for ReportLab
-                import re as _rmd
-                # Strip ALL markdown formatting
-                clean_body = body
-                clean_body = _rmd.sub(r'\*\*(.+?)\*\*', r'\1', clean_body)  # bold
-                clean_body = _rmd.sub(r'\*(.+?)\*',       r'\1', clean_body)  # italic
-                clean_body = _rmd.sub(r'^#{1,6}\s+',       '',     clean_body, flags=_rmd.MULTILINE)  # headers
-                clean_body = _rmd.sub(r'^-{2,}\s*$',       '',     clean_body, flags=_rmd.MULTILINE)  # --- hr
-                clean_body = _rmd.sub(r'^-\s+',            '• ',   clean_body, flags=_rmd.MULTILINE)  # bullets
-                clean_body = _rmd.sub(r'^\d+\.\s+',      '',     clean_body, flags=_rmd.MULTILINE)  # numbered
-                clean_body = _rmd.sub(r'`(.+?)`',           r'\1', clean_body)  # inline code
-                clean_body = _rmd.sub(r'\[(.+?)\]\(.+?\)', r'\1', clean_body)  # links
-                # Remove any remaining # at start of lines
-                clean_body = _rmd.sub(r'^#+\s*',           '',     clean_body, flags=_rmd.MULTILINE)
-                clean_body = clean_body.strip()
-                safe_body = (clean_body
-                    .replace("&", "&amp;")
-                    .replace("<", "&lt;")
-                    .replace(">", "&gt;"))
-                for para in safe_body.split("\n\n"):
-                    if para.strip():
-                        story.append(Paragraph(para.strip(), body_s))
-                story.append(Spacer(1, 0.1*inch))
-
-            doc.build(story)
-            buf.seek(0)
-            return buf.getvalue()
-
-        # Get original file bytes from session if available
-        orig_bytes = st.session_state.get("gf_orig_bytes", None)
-
-        ec1, ec2 = st.columns(2)
-
-        with ec1:
-            try:
-                pdf_bytes = build_filled_pdf(saved, orig_bytes)
-                fname = saved.get("prog", "Application").replace(" ", "_")
-                st.download_button(
-                    "⬇ Download Filled PDF",
-                    data=pdf_bytes,
-                    file_name=f"VitalView_Filled_{fname}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                    type="primary",
-                )
-                st.caption("📄 Opens as a PDF — edit further in Adobe Acrobat or Preview")
-            except Exception as e:
-                st.error(f"PDF export failed: {e}")
-
-        with ec2:
-            if st.button("🗑 Clear & Start Over", key="gf_clear", use_container_width=True):
-                st.session_state["gf_results"] = {}
-                st.session_state["gf_orig_bytes"] = None
-                st.rerun()
-
-        # Security notice
-        st.markdown(f"""
-        <div style="margin-top:1rem;padding:0.75rem 1rem;background:{T["card"]};
-                    border:1px solid {T["border"]};border-radius:8px;
-                    font-size:0.75rem;color:{T["muted"]};">
-            🔒 <b>Security:</b> Your grant application form was never stored on our servers.
-            All processing happened in your browser session only.
-            This session will be cleared when you close the tab.
-        </div>""", unsafe_allow_html=True)
-
-
-# ================================================================
 # SIDEBAR
 # ================================================================
 def render_sidebar(user):
     T = THEME
     with st.sidebar:
-        # ── Logo + identity ──────────────────────────────────────
         st.markdown(f"""
         <div style="padding:0.5rem 0 0.25rem 0;">
             <div style="display:flex;align-items:center;gap:0.6rem;margin-bottom:0.4rem;">
@@ -3964,6 +3813,9 @@ def main():
     inject_css()
     init_db()
 
+    # SIDEBAR TEST — add this temporarily
+        
+        
     # Session state defaults
     for key, default in [
         ("user",      None),
@@ -3982,16 +3834,144 @@ def main():
     user     = st.session_state["user"]
     features = PLAN_FEATURES.get(user.get("plan", "free"), PLAN_FEATURES["free"])
 
-    # Demo data
+# Demo data
     if st.session_state["demo_mode"] and not dashboard_ready(st.session_state.get("df")):
         demo = get_demo_data()
         st.session_state["df"]  = demo
         st.session_state["dfx"] = demo
 
-    render_sidebar(user)
+    # ── Sidebar inline ────────────────────────────────────────
+    with st.sidebar:
+        T = THEME
+        st.markdown(f"""
+        <div style="padding:0.5rem 0 0.25rem 0;">
+            <div style="display:flex;align-items:center;gap:0.6rem;margin-bottom:0.4rem;">
+                {logo_img(32)}
+                <span style="font-family:Syne,sans-serif;font-weight:800;
+                             font-size:1.1rem;color:{T['text']};">
+                    Vital<span style="color:{T['accent']};">View</span>
+                </span>
+            </div>
+            <div style="font-size:0.78rem;color:{T['muted']};padding-left:2px;">
+                👋 {user.get('name','')} &nbsp;·&nbsp;
+                <span style="color:{T['accent']};font-weight:700;text-transform:uppercase;
+                             font-size:0.68rem;">{user.get('plan','free')}</span>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        if st.button("🚪 Log Out", key="logout_btn", use_container_width=True):
+            audit(user.get("email",""), "logout")
+            st.session_state["user"] = None
+            st.rerun()
+
+        st.markdown(f"""
+        <div style="margin:1rem 0 0.5rem 0;font-size:0.65rem;font-weight:700;
+                    color:{T['primary']};text-transform:uppercase;letter-spacing:0.1em;">
+            Navigation
+        </div>
+        <div style="background:{T['card']};border:1px solid {T['border']};
+                    border-radius:10px;padding:0.75rem;font-size:0.8rem;
+                    color:{T['muted']};line-height:2;">
+            <div>📊 <b style="color:{T['text']};">&nbsp;Dashboard</b> — overview &amp; quality</div>
+            <div>⬆ <b style="color:{T['text']};">&nbsp;Upload</b> — load your CSV/Excel</div>
+            <div>⚖ <b style="color:{T['text']};">&nbsp;Equity Scanner</b> — need vs service gaps</div>
+            <div>🗺 <b style="color:{T['text']};">&nbsp;Map</b> — county choropleth</div>
+            <div>📍 <b style="color:{T['text']};">&nbsp;ZIP Heatmap</b> — ZIP-level risk index</div>
+            <div>📝 <b style="color:{T['text']};">&nbsp;Reports</b> — grant narrative builder</div>
+            <div>🔗 <b style="color:{T['text']};">&nbsp;Correlations</b> — indicator relationships</div>
+            <div>🤖 <b style="color:{T['text']};">&nbsp;AI Grant Writer</b> — AI proposals</div>
+        </div>""", unsafe_allow_html=True)
+
+        st.markdown(f"""
+        <div style="margin:0.75rem 0 0.5rem;font-size:0.65rem;font-weight:700;
+                    color:{T['primary']};text-transform:uppercase;letter-spacing:0.1em;">
+            Upload Format Guide
+        </div>
+        <div style="background:#0f2040;border:1px solid {T['primary']}55;
+                    border-left:3px solid {T['primary']};border-radius:8px;
+                    padding:0.65rem 0.75rem;font-size:0.76rem;
+                    color:{T['text']};line-height:1.5;">
+            <b style="color:{T['accent']};">Dashboard/Map:</b>
+            <code>state, county, fips, year, indicator, value, unit</code><br>
+            <b style="color:{T['accent']};">ZIP Heatmap:</b>
+            <code>zip_code</code> + numeric health columns<br>
+            <b style="color:{T['accent']};">Equity Scanner:</b>
+            location + need metric + service metric
+        </div>""", unsafe_allow_html=True)
+
+        st.markdown(f"""
+        <div style="margin:0.75rem 0 0.35rem;font-size:0.65rem;font-weight:700;
+                    color:{T['primary']};text-transform:uppercase;letter-spacing:0.1em;">
+            Data
+        </div>""", unsafe_allow_html=True)
+
+        demo = st.checkbox(
+            "🧪 Use Demo Data (Illinois + Florida)",
+            value=st.session_state.get("demo_mode", True),
+            key="demo_toggle",
+        )
+        st.session_state["demo_mode"] = demo
+
+        sb_upload = st.file_uploader(
+            "📂 Upload CSV or Excel",
+            type=["csv", "xlsx", "xls"],
+            key="sidebar_upload",
+        )
+        if sb_upload:
+            try:
+                raw         = load_file(sb_upload)
+                schema      = enforce_schema(raw)
+                df_to_store = schema if dashboard_ready(schema) else raw
+                st.session_state["raw_df"]      = df_to_store
+                st.session_state["upload_name"] = sb_upload.name
+                if dashboard_ready(schema):
+                    st.session_state["df"]        = schema
+                    st.session_state["dfx"]       = schema
+                    st.session_state["demo_mode"] = False
+                    st.success(f"✅ {sb_upload.name} — {len(schema):,} rows")
+                else:
+                    st.info(f"✅ Loaded {sb_upload.name}")
+            except Exception as e:
+                st.error(f"⚠️ Could not load file. ({type(e).__name__})")
+
+        df_cur = st.session_state.get("df", pd.DataFrame())
+        if dashboard_ready(df_cur):
+            st.markdown(f"""
+            <div style="margin:1rem 0 0.5rem;font-size:0.65rem;font-weight:700;
+                        color:{T['primary']};text-transform:uppercase;letter-spacing:0.1em;">
+                Filters
+            </div>""", unsafe_allow_html=True)
+            states       = sorted(df_cur["state"].dropna().unique().tolist())
+            sel_states   = st.multiselect("State(s)", states, default=states, key="f_states")
+            df_f         = df_cur[df_cur["state"].isin(sel_states)] if sel_states else df_cur
+            counties     = sorted(df_f["county"].dropna().unique().tolist())
+            sel_counties = st.multiselect("County(ies)", counties, key="f_counties")
+            if sel_counties:
+                df_f = df_f[df_f["county"].isin(sel_counties)]
+            if "year" in df_f.columns:
+                years = sorted(df_f["year"].dropna().unique().tolist())
+                if len(years) > 1:
+                    yr = st.slider(
+                        "Year range",
+                        int(min(years)), int(max(years)),
+                        (int(min(years)), int(max(years))),
+                        key="f_years",
+                    )
+                    df_f = df_f[(df_f["year"] >= yr[0]) & (df_f["year"] <= yr[1])]
+            st.session_state["dfx"] = df_f
+
+        st.markdown(f"""
+        <div style="margin-top:1.5rem;padding-top:1rem;
+                    border-top:1px solid {T['border']};
+                    font-size:0.72rem;color:{T['muted']};line-height:1.6;">
+            🔒 Your uploaded data is never stored.<br>
+            All analysis runs in your session only.<br><br>
+            <span style="color:{T['accent']};">VitalView v2.1</span> · © 2025 Christopher Chaney
+        </div>""", unsafe_allow_html=True)
+
     navbar(user.get("name", ""), user.get("plan", "free"))
 
-    # ── Pilot stability banner (dismissable per session) ─────
+    # ── Pilot stability banner ────────────────────────────────
     if not st.session_state.get("pilot_banner_dismissed"):
         T = THEME
         col_msg, col_btn = st.columns([10, 1])
@@ -3999,8 +3979,7 @@ def main():
             st.markdown(f"""
             <div style="background:#1c2a1c;border:1px solid #22c55e55;border-radius:8px;
                         padding:0.55rem 1rem;font-size:0.78rem;color:#86efac;margin-bottom:0.5rem;">
-                🧪 <b>Pilot Mode</b> — This is an early-access version of VitalView.
-                Accounts may reset when updates are deployed. Do not upload sensitive PII.
+                🧪 <b>Pilot Mode</b> — Early-access version of VitalView.
                 Feedback? <a href="mailto:support@vitalview.health" style="color:#4ade80;">
                 support@vitalview.health</a>
             </div>""", unsafe_allow_html=True)
@@ -4020,8 +3999,8 @@ def main():
         "🗺  Map",
         "📍  ZIP Heatmap",
         "📝  Reports",
+        "🔗  Correlations",
         "🤖  AI Grant Writer",
-        "📋  Grant Form Filler",
     ]
     tab_fns = [
         lambda: tab_dashboard(dfx, features),
@@ -4030,8 +4009,8 @@ def main():
         lambda: tab_map(dfx),
         tab_zip_heatmap,
         lambda: tab_reports(dfx, features),
+        lambda: tab_correlation(dfx, features),
         lambda: tab_ai_grant(dfx, features),
-        lambda: tab_grant_form(dfx, features),
     ]
     if is_admin:
         tab_labels.append("🛠  Admin")

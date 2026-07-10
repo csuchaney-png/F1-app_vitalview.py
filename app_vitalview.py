@@ -3992,7 +3992,7 @@ def main():
     dfx = st.session_state.get("dfx", df)
 
     is_admin  = user.get("plan") == "admin"
-    tab_labels = [
+tab_labels = [
         "📊  Dashboard",
         "⬆  Upload",
         "⚖  Equity Scanner",
@@ -4001,6 +4001,7 @@ def main():
         "📝  Reports",
         "🔗  Correlations",
         "🤖  AI Grant Writer",
+        "📋  Grant Form Filler",
     ]
     tab_fns = [
         lambda: tab_dashboard(dfx, features),
@@ -4011,6 +4012,7 @@ def main():
         lambda: tab_reports(dfx, features),
         lambda: tab_correlation(dfx, features),
         lambda: tab_ai_grant(dfx, features),
+        lambda: tab_grant_form(dfx, features),
     ]
     if is_admin:
         tab_labels.append("🛠  Admin")

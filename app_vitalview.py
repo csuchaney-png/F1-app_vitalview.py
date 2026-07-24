@@ -3336,7 +3336,413 @@ Write in a {tone} voice. Be funder-ready, compelling, and data-grounded."""
             if st.button("🗑 Clear Draft", key="ai_clear", use_container_width=True):
                 st.session_state["ai_draft_sections"] = {}
                 st.rerun()
+# ================================================================
+# TAB — GRANT MATCH (Live Grants.gov Search)
+# Drop-in addition to app_vitalview.py
+#
+# SAFETY PRINCIPLES (read before modifying):
+#  1. ONLY the official Grants.gov public API is used. No scraping, no
+#     third-party aggregator sites, no AI-generated grant listings.
+#  2. Every opportunity shown comes from a live API response — the code
+#     never lets an LLM invent a grant name, number, or link.
+#  3. Every link is built as https://www.grants.gov/search-results-detail/{id}
+#     using the real numeric id returned by the API. Never guessed.
+#  4. Default status filter excludes closed/archived opportunities so
+#     users are never pointed at dead grants.
+#  5. State/local/foundation resources are a short, hardcoded list of
+#     verified official .gov portals — never presented as search
+#     results, always labeled as external links to click through.
+#
+# HOW TO ADD:
+# 1. Paste this entire block into app_vitalview.py (after tab_grant_form,
+#    before tab_admin — or anywhere at module level).
+# 2. In main(), add to tab_labels:      "🎯 Federal Grants",
+# 3. In main(), add to tab_fns:         lambda: tab_grant_match(dfx),
+#    (No `features` gate — available on all plans; costs nothing per use.)
+# ================================================================
 
+GRANTS_GOV_SEARCH_URL = "https://api.grants.gov/v1/api/search2"
+
+# Maps a Grants.gov funding-category code to a label and the keywords
+# used to auto-detect it from the user's own indicator names.
+GRANT_CATEGORY_MAP = {
+    "HL":  ("Health", ["obesity", "health", "chronic disease", "diabetes",
+                        "uninsured", "insurance", "mental health", "maternal", "disease"]),
+    "FN":  ("Food and Nutrition", ["food desert", "food insecurity", "nutrition",
+                                    "food access", "snap", "hunger"]),
+    "T":   ("Transportation", ["car", "vehicle", "transit", "transportation", "commute"]),
+    "ENV": ("Environment", ["pm2.5", "air quality", "pollution", "environment",
+                             "climate", "emissions"]),
+    "HO":  ("Housing", ["housing", "homeless", "rent", "eviction"]),
+    "CD":  ("Community Development", ["community development", "neighborhood",
+                                       "blight", "revitalization"]),
+    "IS":  ("Income Security & Social Services", ["poverty", "income", "unemployment",
+                                                    "social services", "welfare"]),
+    "AG":  ("Agriculture", ["agriculture", "farm", "urban farming", "greenhouse", "garden"]),
+    "ELT": ("Employment, Labor & Training", ["employment", "job", "workforce",
+                                              "labor", "training"]),
+    "NR":  ("Natural Resources", ["water", "land", "conservation", "natural resources"]),
+    "ED":  ("Education", ["education", "school", "literacy", "student"]),
+}
+
+ELIGIBILITY_OPTIONS = {
+    "12": "Nonprofits (501(c)(3))",
+    "13": "Nonprofits (non-501(c)(3))",
+    "00": "State governments",
+    "01": "County governments",
+    "02": "City/township governments",
+    "25": "Other",
+    "99": "Unrestricted / Any applicant",
+}
+
+# Verified official portals — hardcoded, never scraped, never presented
+# as search results. Add more only after confirming the URL directly.
+OFFICIAL_RESOURCE_LINKS = [
+    ("USA.gov — Federal & State Grant Finder", "https://www.usa.gov/grants"),
+    ("SAM.gov — Federal Contract & Assistance Opportunities", "https://sam.gov"),
+    ("Illinois GATA Grants Portal", "https://gata.illinois.gov"),
+]
+
+
+def _grant_auto_detect_categories(df):
+    """Read the user's own indicator names and map them to Grants.gov
+    funding-category codes. Returns a set of codes."""
+    detected = set()
+    if df is None or df.empty or "indicator" not in df.columns:
+        return detected
+    names_blob = " ".join(df["indicator"].dropna().unique().tolist()).lower()
+    for code, (label, keywords) in GRANT_CATEGORY_MAP.items():
+        if any(kw in names_blob for kw in keywords):
+            detected.add(code)
+    return detected
+
+
+def _search_grants_gov(keyword="", category="", eligibilities="",
+                        statuses="forecasted|posted", rows=25):
+    """One call to the live, public, no-key-required Grants.gov search2
+    endpoint. Returns (list_of_hits, error_message)."""
+    import requests as _req
+    try:
+        resp = _req.post(
+            GRANTS_GOV_SEARCH_URL,
+            headers={"Content-Type": "application/json"},
+            json={
+                "rows": rows,
+                "keyword": keyword,
+                "eligibilities": eligibilities,
+                "agencies": "",
+                "oppStatuses": statuses,
+                "aln": "",
+                "fundingCategories": category,
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return None, f"Grants.gov returned HTTP {resp.status_code}."
+        payload = resp.json()
+        if payload.get("errorcode") not in (0, None):
+            return None, payload.get("msg", "Grants.gov reported an error.")
+        hits = payload.get("data", {}).get("oppHits", []) or []
+        return hits, None
+    except Exception as e:
+        return None, f"Could not reach Grants.gov ({type(e).__name__}). Try again shortly."
+
+
+def tab_grant_match(df):
+    T = THEME
+    disclaimer_banner()
+
+    section("Federal Grant Match")
+    st.markdown(
+        f"<p style='color:{T['muted']};font-size:0.9rem;margin-bottom:1rem;'>"
+        "Search <b>live federal grant opportunities</b> from Grants.gov, matched to "
+        "your organization's actual data. Every result is pulled directly from the "
+        "official government database — real listings, real deadlines, real links.</p>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(f"""
+    <div style="background:#2a1f0a;border:1px solid {T['warn']}44;
+                border-left:3px solid {T['warn']};border-radius:8px;
+                padding:0.75rem 1rem;margin-bottom:1.25rem;
+                font-size:0.78rem;color:#fbbf24;line-height:1.5;">
+        📋 <b>Scope: federal grants only.</b> This tool searches U.S. federal
+        funding (HHS, USDA, HUD, CDC, and other agencies) via Grants.gov. It does
+        <b>not</b> cover private foundation, corporate, or in-kind funding — those
+        aren't available through any free public database. For those, use the
+        official portals linked at the bottom of this page. Foundation discovery
+        is on the VitalView roadmap.
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div style="background:#0a1628;border:1px solid {T['primary']}44;
+                border-left:3px solid {T['primary']};border-radius:8px;
+                padding:0.75rem 1rem;margin-bottom:1.25rem;
+                font-size:0.78rem;color:{T['muted']};line-height:1.5;">
+        🏛️ <b>Source:</b> Grants.gov's official public search API
+        (<code>api.grants.gov</code>) — the U.S. government's central portal for
+        federal funding opportunities. VitalView does not scrape, aggregate from
+        third parties, or generate listings with AI. Every link points to the
+        official <code>grants.gov</code> opportunity page.
+    </div>""", unsafe_allow_html=True)
+
+    # ── Auto-detected focus areas from the user's data ─────────
+    detected = _grant_auto_detect_categories(df)
+    if detected:
+        detected_labels = ", ".join(GRANT_CATEGORY_MAP[c][0] for c in sorted(detected))
+        st.markdown(f"""
+        <div style="background:#0f2d1a;border:1px solid {T['good']}44;
+                    border-left:3px solid {T['good']};border-radius:8px;
+                    padding:0.7rem 1rem;margin-bottom:1rem;
+                    font-size:0.8rem;color:#86efac;line-height:1.5;">
+            ✓ <b>Detected from your data:</b> {detected_labels}. These are
+            pre-selected below — adjust as needed.
+        </div>""", unsafe_allow_html=True)
+
+    section("Configure Search")
+
+    all_codes  = list(GRANT_CATEGORY_MAP.keys())
+    all_labels = {c: GRANT_CATEGORY_MAP[c][0] for c in all_codes}
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        selected_cats = st.multiselect(
+            "Focus areas (auto-detected from your data, editable)",
+            options=all_codes,
+            default=sorted(detected) if detected else [],
+            format_func=lambda c: all_labels[c],
+            key="gm_categories",
+        )
+    with c2:
+        keyword = st.text_input(
+            "Additional keywords (optional)",
+            placeholder="e.g. greenhouse, urban agriculture",
+            key="gm_keyword",
+        )
+
+    c3, c4 = st.columns(2)
+    with c3:
+        elig_sel = st.multiselect(
+            "Eligible applicant type",
+            options=list(ELIGIBILITY_OPTIONS.keys()),
+            default=["12", "13"],
+            format_func=lambda k: ELIGIBILITY_OPTIONS[k],
+            key="gm_eligibility",
+        )
+    with c4:
+        include_forecasted = st.checkbox(
+            "Include forecasted (not yet open)", value=True, key="gm_forecasted"
+        )
+        include_closed = st.checkbox(
+            "Include closed/archived (for reference only)", value=False, key="gm_closed"
+        )
+
+    if not selected_cats and not keyword.strip():
+        st.info("Select at least one focus area or enter a keyword to search.")
+        return
+
+    status_parts = ["posted"]
+    if include_forecasted:
+        status_parts.append("forecasted")
+    if include_closed:
+        status_parts += ["closed", "archived"]
+    status_str = "|".join(status_parts)
+
+    elig_str = ",".join(elig_sel) if elig_sel else ""
+
+    run = st.button("🔍 Search Federal Grants (Grants.gov)", type="primary", key="gm_search_btn")
+
+    if run:
+        with st.spinner("Searching official federal opportunities…"):
+            merged   = {}
+            errors   = []
+            searches = []
+
+            if selected_cats:
+                for code in selected_cats:
+                    searches.append({"category": code, "keyword": ""})
+            if keyword.strip():
+                searches.append({"category": "", "keyword": keyword.strip()})
+            if not searches:
+                searches.append({"category": "", "keyword": ""})
+
+            for s in searches:
+                hits, err = _search_grants_gov(
+                    keyword=s["keyword"],
+                    category=s["category"],
+                    eligibilities=elig_str,
+                    statuses=status_str,
+                    rows=25,
+                )
+                if err:
+                    errors.append(err)
+                    continue
+                for h in hits:
+                    opp_id = h.get("id")
+                    if not opp_id:
+                        continue
+                    if opp_id not in merged:
+                        h["_matched_categories"] = set()
+                    else:
+                        h = merged[opp_id]
+                    if s["category"]:
+                        h["_matched_categories"].add(all_labels.get(s["category"], s["category"]))
+                    if s["keyword"]:
+                        h["_matched_categories"].add(f"keyword: {s['keyword']}")
+                    merged[opp_id] = h
+
+            st.session_state["gm_results"] = list(merged.values())
+            st.session_state["gm_errors"]  = errors
+
+    results = st.session_state.get("gm_results", [])
+    errors  = st.session_state.get("gm_errors", [])
+
+    if errors:
+        for e in errors:
+            st.warning(f"⚠️ {e}")
+
+    if not run and not results:
+        return
+
+    if run and not results and not errors:
+        empty_state(
+            "🎯", "No matching opportunities found",
+            "Try broadening your focus areas, removing keywords, or including "
+            "forecasted opportunities.",
+        )
+        return
+
+    if results:
+        section(f"Federal Results — {len(results)} Opportunities Found")
+
+        status_colors = {
+            "posted":    T["good"],
+            "forecasted": T["primary"],
+            "closed":    T["muted"],
+            "archived":  T["muted"],
+        }
+
+        # Sort: posted first, then forecasted, then by close date
+        def _sort_key(h):
+            order = {"posted": 0, "forecasted": 1, "closed": 2, "archived": 3}
+            return order.get(h.get("oppStatus", ""), 9)
+
+        results_sorted = sorted(results, key=_sort_key)
+
+        if "gm_shortlist" not in st.session_state:
+            st.session_state["gm_shortlist"] = {}
+
+        for h in results_sorted:
+            opp_id     = h.get("id", "")
+            title      = h.get("title", "Untitled Opportunity")
+            agency     = h.get("agencyName") or h.get("agencyCode", "Unknown Agency")
+            status     = h.get("oppStatus", "unknown")
+            open_date  = h.get("openDate", "—") or "—"
+            close_date = h.get("closeDate", "—") or "—"
+            number     = h.get("number", "—")
+            alns       = ", ".join(h.get("alnist", []) or []) or "—"
+            matched    = h.get("_matched_categories", set())
+            status_color = status_colors.get(status, T["muted"])
+            official_url = f"https://www.grants.gov/search-results-detail/{opp_id}"
+
+            matched_html = ""
+            if matched:
+                chips = "".join(
+                    f"<span style='display:inline-block;background:{T['primary']}18;"
+                    f"color:{T['primary']};font-size:0.65rem;font-weight:600;"
+                    f"padding:0.15rem 0.5rem;border-radius:999px;margin:0.15rem 0.25rem 0 0;'>"
+                    f"{m}</span>"
+                    for m in sorted(matched)
+                )
+                matched_html = (
+                    f"<div style='margin-top:0.5rem;'>"
+                    f"<span style='font-size:0.65rem;color:{T['muted']};'>Matched on:</span> "
+                    f"{chips}</div>"
+                )
+
+            with st.container():
+                st.markdown(f"""
+                <div class="vv-card" style="margin-bottom:0.85rem;">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;">
+                        <div style="flex:1;">
+                            <div style="font-size:0.95rem;font-weight:700;color:{T['text']};margin-bottom:0.3rem;">
+                                {title}
+                            </div>
+                            <div style="font-size:0.78rem;color:{T['muted']};">
+                                {agency} · Opportunity #{number} · ALN: {alns}
+                            </div>
+                            {matched_html}
+                        </div>
+                        <div style="text-align:right;flex-shrink:0;">
+                            <span class="vv-badge" style="color:{status_color};
+                                        border-color:{status_color}33;background:{status_color}18;">
+                                {status.upper()}
+                            </span>
+                            <div style="font-size:0.7rem;color:{T['muted']};margin-top:0.4rem;">
+                                Opens: {open_date}<br>Closes: {close_date}
+                            </div>
+                        </div>
+                    </div>
+                </div>""", unsafe_allow_html=True)
+
+                bc1, bc2 = st.columns([1, 5])
+                with bc1:
+                    st.link_button("🔗 View on Grants.gov", official_url,
+                                   use_container_width=True)
+                with bc2:
+                    in_shortlist = opp_id in st.session_state["gm_shortlist"]
+                    if st.button(
+                        "★ Remove from Shortlist" if in_shortlist else "☆ Add to Shortlist",
+                        key=f"gm_save_{opp_id}",
+                    ):
+                        if in_shortlist:
+                            del st.session_state["gm_shortlist"][opp_id]
+                        else:
+                            st.session_state["gm_shortlist"][opp_id] = {
+                                "title": title, "agency": agency, "number": number,
+                                "status": status, "open_date": open_date,
+                                "close_date": close_date, "url": official_url,
+                            }
+                        st.rerun()
+
+    # ── Shortlist ────────────────────────────────────────────
+    shortlist = st.session_state.get("gm_shortlist", {})
+    if shortlist:
+        st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
+        section(f"⭐ Your Shortlist ({len(shortlist)})")
+        shortlist_df = pd.DataFrame(list(shortlist.values()))
+        st.dataframe(shortlist_df, use_container_width=True, height=min(300, 60 + len(shortlist) * 40))
+        st.download_button(
+            "⬇ Download Shortlist (CSV)",
+            data=safe_csv(shortlist_df),
+            file_name="vitalview_grant_shortlist.csv",
+            mime="text/csv",
+        )
+        if st.button("🗑 Clear Shortlist", key="gm_clear_shortlist"):
+            st.session_state["gm_shortlist"] = {}
+            st.rerun()
+
+    # ── State / foundation resources (link-throughs only) ────
+    st.markdown("<div style='height:2rem'></div>", unsafe_allow_html=True)
+    section("State, Foundation & Other Funding")
+    st.markdown(
+        f"<p style='color:{T['muted']};font-size:0.82rem;margin-bottom:0.75rem;'>"
+        "The search above covers <b>federal</b> grants only. State, foundation, "
+        "corporate, and in-kind funding aren't available through a free public API, "
+        "so VitalView does not search them programmatically — doing so would risk "
+        "surfacing inaccurate listings. Use these official portals to search each "
+        "source directly.</p>",
+        unsafe_allow_html=True,
+    )
+    for label, url in OFFICIAL_RESOURCE_LINKS:
+        st.markdown(f"""
+        <div style="background:{T['card']};border:1px solid {T['border']};
+                    border-radius:8px;padding:0.65rem 1rem;margin-bottom:0.5rem;
+                    display:flex;justify-content:space-between;align-items:center;">
+            <span style="font-size:0.82rem;color:{T['text']};">🔗 {label}</span>
+            <a href="{url}" target="_blank" style="font-size:0.78rem;color:{T['primary']};
+               font-weight:600;text-decoration:none;">Open ↗</a>
+        </div>""", unsafe_allow_html=True)
 # ================================================================
 # TAB — ADMIN PANEL (admin plan only)
 # ================================================================
@@ -3991,17 +4397,17 @@ def main():
     df  = st.session_state.get("df",  pd.DataFrame())
     dfx = st.session_state.get("dfx", df)
 
-    is_admin  = user.get("plan") == "admin"
-tab_labels = [
-        "📊  Dashboard",
-        "⬆  Upload",
-        "⚖  Equity Scanner",
-        "🗺  Map",
-        "📍  ZIP Heatmap",
-        "📝  Reports",
-        "🔗  Correlations",
-        "🤖  AI Grant Writer",
-        "📋  Grant Form Filler",
+    is_admin = user.get("plan") == "admin"
+    tab_labels = [
+        "📊 Dashboard",
+        "⬆ Upload",
+        "⚖ Equity Scanner",
+        "🗺 Map",
+        "📍 ZIP Heatmap",
+        "📝 Reports",
+        "🔗 Correlations",
+        "🤖 AI Writer",
+        "🎯 Federal Grants",
     ]
     tab_fns = [
         lambda: tab_dashboard(dfx, features),
@@ -4012,10 +4418,10 @@ tab_labels = [
         lambda: tab_reports(dfx, features),
         lambda: tab_correlation(dfx, features),
         lambda: tab_ai_grant(dfx, features),
-        lambda: tab_grant_form(dfx, features),
+        lambda: tab_grant_match(dfx),
     ]
     if is_admin:
-        tab_labels.append("🛠  Admin")
+        tab_labels.append("🛠 Admin")
         tab_fns.append(lambda: tab_admin(user))
 
     tabs = st.tabs(tab_labels)
